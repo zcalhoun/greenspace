@@ -1,0 +1,11 @@
+# environment
+.venv/
+
+# data
+data/
+
+# results
+results/
+
+# other
+.DS_Store
