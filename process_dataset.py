@@ -66,56 +66,103 @@ def process_city(data_dir, city, output_dir, window_size):
         obj = [{"temp": v.item()} for v in temperature]
 
         extract_coords(gdf, obj)
+        extract_elevation(gdf, elev_file, obj)
 
-        extract_nlcd(gdf, nlcd_file, obj, window_size)
+        # Ensure all rasters are in the same CRS as the points
+        with rasterio.open(nlcd_file) as src:
+            if gdf.crs != src.crs:
+                nlcd_gdf = gdf.to_crs(src.crs)
 
-        extract_greenspace(gdf, greenspace_file, obj, window_size)
+        with rasterio.open(ndvi_albedo_file) as src:
+            if gdf.crs != src.crs:
+                ndvi_albedo_gdf = gdf.to_crs(src.crs)
 
-        extract_ndvi_albedo(gdf, ndvi_albedo_file, obj, window_size)
+        with rasterio.open(greenspace_file) as src:
+            if gdf.crs != src.crs:
+                greenspace_gdf = gdf.to_crs(src.crs)
 
-        extract_elevation(gdf, elev_file, obj, window_size)
+        parent_dir = os.path.join(output_dir, city, time)
+        os.makedirs(parent_dir, exist_ok=True)
+        for i, o in enumerate(obj):
+            nlcd = extract_nlcd(nlcd_gdf.iloc[0], nlcd_file, window_size)
+            greenspace = extract_greenspace(
+                greenspace_gdf.iloc[0], greenspace_file, window_size
+            )
+            ndvi_albedo = extract_ndvi_albedo(
+                ndvi_albedo_gdf.iloc[0], ndvi_albedo_file, window_size
+            )
 
-        filtered_obj = validate_obj(obj, window_size)
+            if nlcd is None:
+                continue
+            if greenspace is None:
+                continue
+            if ndvi_albedo is None:
+                continue
 
-        output_path = os.path.join(output_dir, city, time)
+            o["nlcd_window"] = nlcd
+            o["greenspace_window"] = greenspace
+            o["ndvi_albedo"] = ndvi_albedo
 
-        if not os.path.exists(output_path):
-            os.makedirs(output_path)
+            output_file = os.path.join(output_dir, city, time, f"{i}.json")
 
-        for i in range(len(filtered_obj)):
-            output_file = os.path.join(output_path, f"{i}.json")
             with open(output_file, "w") as f:
-                json.dump(filtered_obj[i], f)
+                json.dump(o, f)
 
 
-def validate_obj(obj, window_size):
-    filtered_obj = []
-    for item in obj:
-        if (
-            "nlcd_window" in item
-            and item["nlcd_window"] is not None
-            and np.array(item["nlcd_window"]).shape != (window_size, window_size)
-        ):
-            continue
-        if (
-            "greenspace_window" in item
-            and item["greenspace_window"] is not None
-            and np.array(item["greenspace_window"]).shape != (window_size, window_size)
-        ):
-            continue
-        if (
-            "ndvi_albedo_window" in item
-            and item["ndvi_albedo_window"] is not None
-            and np.array(item["ndvi_albedo_window"]).shape
-            != (2, window_size, window_size)
-        ):
-            continue
-        filtered_obj.append(item)
+def extract_ndvi_albedo(point, ndvi_albedo_file, window_size):
 
-    return filtered_obj
+    with rasterio.open(ndvi_albedo_file) as src:
+        row, col = src.index(point.geometry.x, point.geometry.y)
+
+        half_window = window_size // 2
+        window = Window(col - half_window, row - half_window, window_size, window_size)
+
+        try:
+            # Read the window
+            data = src.read((1, 2), window=window)
+            if data.shape != (2, window_size, window_size):
+                return None
+            return data.tolist()
+        except Exception as e:
+            print(f"Warning: Could not extract value for point {idx}: {e}")
+            return None
 
 
-def extract_elevation(gdf, elev_file, obj, window_size):
+def extract_greenspace(point, greenspace_file, window_size):
+    with rasterio.open(greenspace_file) as src:
+        row, col = src.index(point.geometry.x, point.geometry.y)
+
+        half_window = window_size // 2
+        window = Window(col - half_window, row - half_window, window_size, window_size)
+
+        try:
+            data = src.read(1, window=window)
+            if data.shape != (window_size, window_size):
+                return None
+            return data.tolist()
+        except Exception as e:
+            print(f"Warning: Could not extract greenspace value for point: {e}")
+            return None
+
+
+def extract_nlcd(point, nlcd_file, window_size):
+    with rasterio.open(nlcd_file) as src:
+        row, col = src.index(point.geometry.x, point.geometry.y)
+
+        half_window = window_size // 2
+        window = Window(col - half_window, row - half_window, window_size, window_size)
+
+        try:
+            data = src.read(1, window=window)
+            if data.shape != (window_size, window_size):
+                return None
+            return data.tolist()
+        except Exception as e:
+            print(f"Warning: Could not extract NLCD value for point: {e}")
+            return None
+
+
+def extract_elevation(gdf, elev_file, obj):
     with rasterio.open(elev_file) as src:
         # Reproject points to raster CRS if needed
         if gdf.crs != src.crs:
@@ -137,105 +184,6 @@ def extract_elevation(gdf, elev_file, obj, window_size):
 
         for idx, elev in enumerate(elevations):
             obj[idx]["elev"] = elev.item()
-
-
-def extract_ndvi_albedo(gdf, ndvi_albedo_file, obj, window_size):
-    with rasterio.open(ndvi_albedo_file) as src:
-        if gdf.crs != src.crs:
-            gdf_reproj = gdf.to_crs(src.crs)
-        else:
-            gdf_reproj = gdf
-
-        for idx, point in gdf_reproj.iterrows():
-            # Get pixel coordinates
-            row, col = src.index(point.geometry.x, point.geometry.y)
-
-            # Calculate window around the point
-
-            half_window = window_size // 2
-            window = Window(
-                col - half_window, row - half_window, window_size, window_size
-            )
-
-            try:
-                # Read the window
-                data = src.read((1, 2), window=window)
-
-                obj[idx]["ndvi_albedo_window"] = data.tolist()
-            except Exception as e:
-                # Handle edge cases (points outside raster, etc.)
-                obj[idx]["ndvi_albedo_window"] = None
-                print(f"Warning: Could not extract value for point {idx}: {e}")
-
-
-def extract_greenspace(gdf, greenspace_file, obj, window_size):
-    # Greenspace file
-    with rasterio.open(greenspace_file) as src:
-        # Reproject points to raster CRS if needed
-        if gdf.crs != src.crs:
-            gdf_reproj = gdf.to_crs(src.crs)
-        else:
-            gdf_reproj = gdf
-
-        for idx, point in gdf_reproj.iterrows():
-            # Get pixel coordinates
-            row, col = src.index(point.geometry.x, point.geometry.y)
-
-            # Calculate window around the point
-            half_window = window_size // 2
-            window = Window(
-                col - half_window, row - half_window, window_size, window_size
-            )
-
-            try:
-                # Read the window
-                data = src.read(1, window=window)
-
-                # Handle nodata values
-                # if src.nodata is not None:
-                #     data = np.ma.masked_equal(data, src.nodata)
-
-                obj[idx]["greenspace_window"] = data.tolist()
-            except Exception as e:
-                # Handle edge cases (points outside raster, etc.)
-                obj[idx]["greenspace_window"] = None
-                print(f"Warning: Could not extract value for point {idx}: {e}")
-
-
-def extract_nlcd(gdf, nlcd_file, obj, window_size):
-    """
-    Iterate through the NLCD data and add the NLCD window.
-    """
-    with rasterio.open(nlcd_file) as src:
-        # Reproject points to raster CRS if needed
-        if gdf.crs != src.crs:
-            gdf_reproj = gdf.to_crs(src.crs)
-        else:
-            gdf_reproj = gdf
-
-        for idx, point in gdf_reproj.iterrows():
-            # Get pixel coordinates
-            row, col = src.index(point.geometry.x, point.geometry.y)
-
-            # Calculate window around the point
-            half_window = window_size // 2
-            window = Window(
-                col - half_window, row - half_window, window_size, window_size
-            )
-
-            try:
-                # Read the window
-                data = src.read(1, window=window)
-
-                # Handle nodata values
-                if src.nodata is not None:
-                    data = np.ma.masked_equal(data, src.nodata)
-
-                obj[idx]["nlcd_window"] = data.tolist()
-            except Exception as e:
-                # Handle edge cases (points outside raster, etc.)
-                obj[idx]["nlcd_window"] = None
-                print(f"Warning: Could not extract value for point {idx}: {e}")
 
 
 def load_metadata(meta_path: str):
