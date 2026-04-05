@@ -23,7 +23,11 @@ def main(args):
         cities = os.listdir(data_dir)
 
         for city in cities:
-            process_city(data_dir, city, args.output_dir, args.window_size)
+            try:
+                print(f"Processing city: {city}")
+                process_city(data_dir, city, args.output_dir, args.window_size)
+            except Exception as e:
+                print(f"Error processing city {city}: {e}")
     else:
         process_city(data_dir, args.city, args.output_dir, args.window_size)
 
