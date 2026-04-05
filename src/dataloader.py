@@ -62,10 +62,14 @@ class GreenspaceDataset(Dataset):
             data = json.load(f)
 
         coords = torch.tensor(data["coords"], dtype=torch.float32)
-        elev = torch.tensor(data["elev"], dtype=torch.float32)
+        elev = torch.tensor(data["elev"], dtype=torch.float32).unsqueeze(
+            0
+        )  # Add channel dimension
         nlcd_window = torch.tensor(data["nlcd_window"])
         greenspace_window = torch.tensor(data["greenspace_window"])
         ndvi_albedo_window = torch.tensor(data["ndvi_albedo_window"])
+        # Clip ndvi/albedo values to [0, 1]
+        ndvi_albedo_window = torch.clamp(ndvi_albedo_window, 0.0, 1.0)
         temp = torch.tensor(data["temp"], dtype=torch.float32)
 
         nlcd_oh = self._create_one_hot(nlcd_window, _NLCD_CLASSES).permute(
