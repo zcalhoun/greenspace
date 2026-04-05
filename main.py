@@ -15,15 +15,20 @@ from gpytorch.mlls import VariationalELBO
 sys.path.append("./src")
 from dataloader import GreenspaceDataset
 from model import CompleteModel
+from utils import SimpleLogger
 
 
 def main(args):
+
+    logger = SimpleLogger()
+    logger.info(args)
 
     gs = GreenspaceDataset(args.data_dir, greenspace=args.greenspace)
 
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
 
+    logger.info("Performing block split of the data...")
     train_idx, val_idx, test_idx = block_split(gs, args.num_clusters, args.output_dir)
 
     train_dataset = Subset(gs, train_idx)
@@ -33,39 +38,45 @@ def main(args):
     ######
     # Initialize the training set up.
     ######
-    l2_lambdas = [1e-2, 1e-1, 1, 10, 100]
+    l2_lambdas = [1e-5, 1e-4, 1e-3, 1e-2, 1e-1]
 
     results = []
     for l2_penalty in l2_lambdas:
+        logger.info(f"Training with L2 penalty: {l2_penalty}")
         train_result, model, likelihood = train(
             train_dataset, val_dataset, l2_penalty, args
         )
+        logger.info(f"Validation MSE: {train_result}")
         results.append(train_result)
 
     for i in range(args.bayes_opt_iters):
         # Get the next set of hyperparameters to try
-        print("Bayesian optimization iteration", i + 1)
+        logger.info(f"Bayesian optimization iteration {i + 1}")
 
         l2_penalty = bopt_get_next_parameter(l2_lambdas, results)
-
+        logger.info(f"Next L2 penalty to try: {l2_penalty}")
         # Train the model with these hyperparameters
         train_result, model, likelihood = train(
             train_dataset, val_dataset, l2_penalty, args
         )
+        logger.info(f"Validation MSE: {train_result}")
+        l2_lambdas.append(l2_penalty)
         results.append(train_result)
 
     #####
     # Final model training with the best hyperparameters
     #####
     best_l2_penalty = l2_lambdas[np.argmin(results)]
-    print("Best L2 penalty found:", best_l2_penalty)
+    logger.info(f"Best L2 penalty found: {best_l2_penalty}")
     # combine training and validation datasets for final training
-    combined_dataset = torch.utils.data.ConcatDataset([train_dataset, val_dataset])
+
+    full_train_idx = np.concatenate([train_idx, val_idx])
+    full_train_dataset = Subset(gs, full_train_idx)
 
     test_error, model, likelihood = train(
-        combined_dataset, test_dataset, best_l2_penalty, args
+        full_train_dataset, test_dataset, best_l2_penalty, args
     )
-    print("Test MSE with best L2 penalty:", test_error)
+    logger.info(f"Test MSE with best L2 penalty: {test_error}")
 
     error = {"test_mse": test_error, "best_l2_penalty": best_l2_penalty}
     np.save(os.path.join(args.output_dir, "results.npy"), error)
@@ -84,13 +95,13 @@ def bopt_get_next_parameter(l2_lambdas, results):
     gp = GaussianProcessRegressor(k)
     gp.fit(X, y)
 
-    test_points = np.logspace(-2, 2, 100)
+    test_points = np.logspace(-6, 1, 1000)
     test_points = np.log(test_points).reshape(-1, 1)
 
     mu, std = gp.predict(test_points, return_std=True)
 
-    argmax = np.argmax(mu + std)
-    return np.exp(test_points[argmax][0])
+    argmin = np.argmin(mu - std)
+    return np.exp(test_points[argmin][0])
 
 
 def train(train_ds, val_ds, l2_penalty, args):
