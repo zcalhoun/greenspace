@@ -84,12 +84,12 @@ def process_city(data_dir, city, output_dir, window_size):
         parent_dir = os.path.join(output_dir, city, time)
         os.makedirs(parent_dir, exist_ok=True)
         for i, o in enumerate(obj):
-            nlcd = extract_nlcd(nlcd_gdf.iloc[0], nlcd_file, window_size)
+            nlcd = extract_nlcd(nlcd_gdf.iloc[i], nlcd_file, window_size)
             greenspace = extract_greenspace(
-                greenspace_gdf.iloc[0], greenspace_file, window_size
+                greenspace_gdf.iloc[i], greenspace_file, window_size
             )
             ndvi_albedo = extract_ndvi_albedo(
-                ndvi_albedo_gdf.iloc[0], ndvi_albedo_file, window_size
+                ndvi_albedo_gdf.iloc[i], ndvi_albedo_file, window_size
             )
 
             if nlcd is None:
@@ -101,7 +101,7 @@ def process_city(data_dir, city, output_dir, window_size):
 
             o["nlcd_window"] = nlcd
             o["greenspace_window"] = greenspace
-            o["ndvi_albedo"] = ndvi_albedo
+            o["ndvi_albedo_window"] = ndvi_albedo
 
             output_file = os.path.join(output_dir, city, time, f"{i}.json")
 
