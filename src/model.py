@@ -44,7 +44,7 @@ class GPModel(ApproximateGP):
         self.mean_module = gpytorch.means.ZeroMean()
         self.covar_module = gpytorch.kernels.ScaleKernel(
             gpytorch.kernels.MaternKernel(nu=0.5)
-        )
+        ) + gpytorch.kernels.ScaleKernel(gpytorch.kernels.LinearKernel())
 
     def forward(self, x):
 
@@ -59,21 +59,25 @@ class CompleteModel(nn.Module):
     to the GP Layer to fit the complete model.
     """
 
-    def __init__(self, num_dims=31, num_inducing_points=20):
+    def __init__(
+        self, num_dims=31, num_inducing_points=20, size=51, intercept=torch.tensor(15.0)
+    ):
         super().__init__()
 
         self.elevation_weight = nn.Parameter(torch.tensor([-0.01]))
         self.beta = nn.Parameter(torch.randn(num_dims * 2))
-        self.intercept = nn.Parameter(torch.randn(1))
-        self.exp_weight = Exponential(num_dims=num_dims)
+        self.intercept = nn.Parameter(intercept)
+        self.exp_weight = Exponential(size=size, num_dims=num_dims)
         self.gp_layer = GPModel(inducing_points=torch.randn(num_inducing_points, 2))
 
-    def forward(self, c, e, s):
+        self.size = size
+
+    def forward(self, c, e, s, pretrain=False):
         # c is [batch_size, 2]
         # e is [batch_size, 1]
         # s is [batch_size, num_features, size, size]
 
-        point = s[:, :, 25, 25]
+        point = s[:, :, self.size // 2, self.size // 2]
         window_flat = s.flatten(start_dim=2)
 
         # Get the linear terms
@@ -83,6 +87,9 @@ class CompleteModel(nn.Module):
         x = torch.cat([point, linear_terms], dim=1)
 
         mu = e @ self.elevation_weight + x @ self.beta + self.intercept
+
+        if pretrain:
+            return mu
 
         # Get the GP output
         gp_output = self.gp_layer(c)

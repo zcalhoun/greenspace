@@ -49,9 +49,16 @@ class GreenspaceDataset(Dataset):
 
     """
 
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, greenspace=True):
         self.data_dir = data_dir
         self.file_list = [f for f in os.listdir(data_dir) if f.endswith(".json")]
+        self.return_greenspace = greenspace
+
+        _, _, s, t = self.__getitem__(0)
+
+        self.init_temp = t
+        self.window_size = s.size(1)
+        self.num_dims = s.size(0)
 
     def __len__(self):
         return len(self.file_list)
@@ -66,7 +73,7 @@ class GreenspaceDataset(Dataset):
             0
         )  # Add channel dimension
         nlcd_window = torch.tensor(data["nlcd_window"])
-        greenspace_window = torch.tensor(data["greenspace_window"])
+
         ndvi_albedo_window = torch.tensor(data["ndvi_albedo_window"])
         # Clip ndvi/albedo values to [0, 1]
         ndvi_albedo_window = torch.clamp(ndvi_albedo_window, 0.0, 1.0)
@@ -75,12 +82,17 @@ class GreenspaceDataset(Dataset):
         nlcd_oh = self._create_one_hot(nlcd_window, _NLCD_CLASSES).permute(
             2, 0, 1
         )  # (C, H, W)
-        gs_oh = self._create_one_hot(greenspace_window, _GREEN_CLASSES).permute(
-            2, 0, 1
-        )  # (C, H, W)
 
-        # Add the NDVI and albedo channels to the stacked window
-        stacked_window = torch.cat([nlcd_oh, gs_oh, ndvi_albedo_window], dim=0)
+        if self.return_greenspace:
+            greenspace_window = torch.tensor(data["greenspace_window"])
+            gs_oh = self._create_one_hot(greenspace_window, _GREEN_CLASSES).permute(
+                2, 0, 1
+            )  # (C, H, W)
+
+            # Add the NDVI and albedo channels to the stacked window
+            stacked_window = torch.cat([nlcd_oh, gs_oh, ndvi_albedo_window], dim=0)
+        else:
+            stacked_window = torch.cat([nlcd_oh, ndvi_albedo_window], dim=0)
 
         return coords, elev, stacked_window, temp
 
