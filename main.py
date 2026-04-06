@@ -1,4 +1,5 @@
 import os
+import json
 import argparse
 import sys
 
@@ -47,8 +48,9 @@ def main(args):
         train_result, model, likelihood = train(
             train_dataset, val_dataset, l2_penalty, args
         )
-        logger.info(f"Validation MSE: {train_result}")
-        results.append(train_result)
+        logger.info(f"Validation MSE: {train_result['val_mse']}")
+        results.append(train_result["val_mse"])
+        save_result(train_result, args.output_dir)
 
     for i in range(args.bayes_opt_iters):
         # Get the next set of hyperparameters to try
@@ -60,9 +62,10 @@ def main(args):
         train_result, model, likelihood = train(
             train_dataset, val_dataset, l2_penalty, args
         )
-        logger.info(f"Validation MSE: {train_result}")
+        logger.info(f"Validation MSE: {train_result['val_mse']}")
         l2_lambdas.append(l2_penalty)
-        results.append(train_result)
+        results.append(train_result["val_mse"])
+        save_result(train_result, args.output_dir)
 
     #####
     # Final model training with the best hyperparameters
@@ -74,13 +77,14 @@ def main(args):
     full_train_idx = np.concatenate([train_idx, val_idx])
     full_train_dataset = Subset(gs, full_train_idx)
 
-    test_error, model, likelihood = train(
+    train_result, model, likelihood = train(
         full_train_dataset, test_dataset, best_l2_penalty, args
     )
-    logger.info(f"Test MSE with best L2 penalty: {test_error}")
+    logger.info(f"Test MSE with best L2 penalty: {train_result['val_mse']}")
 
-    error = {"test_mse": test_error, "best_l2_penalty": best_l2_penalty}
-    np.save(os.path.join(args.output_dir, "results.npy"), error)
+    with open(os.path.join(args.output_dir, "final_result.json"), "w") as f:
+        json.dump(train_result, f)
+
     # Save
     torch.save(model.state_dict(), os.path.join(args.output_dir, "final_model.pth"))
     torch.save(
@@ -105,6 +109,14 @@ def bopt_get_next_parameter(l2_lambdas, results):
     return np.exp(test_points[argmin][0])
 
 
+def save_result(train_result, output_dir):
+    """Save the training result to a JSONL file."""
+    output_path = os.path.join(output_dir, "training_results.jsonl")
+    with open(output_path, "a") as f:
+        json.dump(train_result, f)
+        f.write("\n")
+
+
 def train(train_ds, val_ds, l2_penalty, args):
     """
     Fit a model and return the best outcome.
@@ -124,6 +136,17 @@ def train(train_ds, val_ds, l2_penalty, args):
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
+
+    training_result = {
+        "l2_penalty": l2_penalty,
+        "train_loss": [],
+        "train_mse": None,
+        "train_r2": None,
+        "val_mse": None,
+        "val_r2": None,
+        "lengthscales": None,
+        "coefficients": None,
+    }
 
     ######
     ## PRE-TRAINING
@@ -154,6 +177,7 @@ def train(train_ds, val_ds, l2_penalty, args):
         logger.info(
             f"Pretrain Epoch {i+1}/{args.pretrain_epochs}, Loss: {epoch_train_loss/epoch_train_count}"
         )
+        training_result["train_loss"].append(epoch_train_loss / epoch_train_count)
 
     ######
     ## MAIN TRAINING LOOP
@@ -192,9 +216,10 @@ def train(train_ds, val_ds, l2_penalty, args):
             epoch_train_count += y_batch.size(0)
 
         train_loss = epoch_train_loss / epoch_train_count
+        training_result["train_loss"].append(train_loss)
 
         if train_loss < best_train_loss:
-            if best_train_loss - train_loss < 0.01:
+            if best_train_loss - train_loss < args.threshold:
                 patience_counter += 1
             best_train_loss = train_loss
         else:
@@ -207,10 +232,42 @@ def train(train_ds, val_ds, l2_penalty, args):
 
     model.eval()
     likelihood.eval()
-    epoch_val_loss = 0
-    epoch_val_count = 0
 
     with torch.no_grad():
+        train_mse = 0
+        train_count = 0
+        all_preds = []
+        all_targets = []
+        for c, e, s, y_batch in train_loader:
+            c, e, s, y_batch = (
+                c.to(device),
+                e.to(device),
+                s.to(device),
+                y_batch.to(device),
+            )
+
+            pred = model(c, e, s)
+            loss = mse_loss_fn(pred.mean, y_batch)
+            train_mse += loss.item() * y_batch.size(0)
+            train_count += y_batch.size(0)
+            all_preds.extend(pred.mean.cpu().numpy())
+            all_targets.extend(y_batch.cpu().numpy())
+
+        # Calc r2 score
+        all_preds = np.array(all_preds)
+        all_targets = np.array(all_targets)
+        ss_res = np.sum((all_targets - all_preds) ** 2)
+        ss_tot = np.sum((all_targets - np.mean(all_targets)) ** 2)
+        r2_score = 1 - ss_res / ss_tot
+        training_result["train_r2"] = r2_score.item()
+
+        train_mse /= train_count
+        training_result["train_mse"] = train_mse
+
+        val_mse = 0
+        val_count = 0
+        all_preds = []
+        all_targets = []
         for c, e, s, y_batch in val_loader:
             c, e, s, y_batch = (
                 c.to(device),
@@ -221,12 +278,27 @@ def train(train_ds, val_ds, l2_penalty, args):
 
             pred = model(c, e, s)
             loss = mse_loss_fn(pred.mean, y_batch)
-            epoch_val_loss += loss.item() * y_batch.size(0)
-            epoch_val_count += y_batch.size(0)
+            val_mse += loss.item() * y_batch.size(0)
+            val_count += y_batch.size(0)
+            all_preds.extend(pred.mean.cpu().numpy())
+            all_targets.extend(y_batch.cpu().numpy())
 
-    val_loss = epoch_val_loss / epoch_val_count
+        # Calc r2 score
+        all_preds = np.array(all_preds)
+        all_targets = np.array(all_targets)
+        ss_res = np.sum((all_targets - all_preds) ** 2)
+        ss_tot = np.sum((all_targets - np.mean(all_targets)) ** 2)
+        r2_score = 1 - ss_res / ss_tot
+        training_result["val_r2"] = r2_score.item()
 
-    return val_loss, model, likelihood
+        val_mse /= val_count
+        training_result["val_mse"] = val_mse
+        training_result["lengthscales"] = (
+            model.exp_weight.lengthscale.detach().cpu().numpy().tolist()
+        )
+        training_result["coefficients"] = model.beta.detach().cpu().numpy().tolist()
+
+    return training_result, model, likelihood
 
 
 def block_split(gs, num_clusters, output_dir=None):
@@ -331,6 +403,12 @@ if __name__ == "__main__":
         "--greenspace",
         action="store_true",
         help="Whether to include the greenspace window as part of the input features.",
+    )
+    parser.add_argument(
+        "--threshold",
+        default=0.001,
+        type=float,
+        help="Minimum improvement threshold for early stopping patience.",
     )
     arguments = parser.parse_args()
     main(arguments)
