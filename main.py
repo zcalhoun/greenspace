@@ -25,9 +25,12 @@ def main(args):
 
     logger.info(args)
 
-    task_id = os.getenv("SLURM_ARRAY_TASK_ID")
-    cities = os.listdir(args.data_dir)
-    city = cities[int(task_id)]
+    if args.test:
+        city = "asheville"
+    else:
+        task_id = os.getenv("SLURM_ARRAY_TASK_ID")
+        cities = os.listdir(args.data_dir)
+        city = cities[int(task_id)]
 
     output_dir = os.path.join(args.output_dir, city)
     if not os.path.exists(output_dir):
@@ -48,7 +51,9 @@ def main(args):
     train_idx, val_idx, test_idx = block_split(gs, args.num_clusters, output_dir)
 
     train_dataset = Subset(gs, train_idx)
-    val_dataset = Subset(gs, val_idx)
+    val_dataset = [
+        Subset(gs, v) for v in val_idx
+    ]  # array for contiguous blocks of data
     test_dataset = Subset(gs, test_idx)
 
     logger.info(
@@ -57,7 +62,7 @@ def main(args):
     ######
     # Initialize the training set up.
     ######
-    l2_lambdas = [1e-5, 1e-4, 1e-3, 1e-2, 1e-1]
+    l2_lambdas = [1e-4, 1e-3, 1e-2, 1e-1, 1]
 
     results = []
     for l2_penalty in l2_lambdas:
@@ -91,7 +96,7 @@ def main(args):
     logger.info(f"Best L2 penalty found: {best_l2_penalty}")
     # combine training and validation datasets for final training
 
-    full_train_idx = np.concatenate([train_idx, val_idx])
+    full_train_idx = np.concatenate([train_idx, np.concatenate(val_idx)])
     full_train_dataset = Subset(gs, full_train_idx)
 
     train_result, model, likelihood = train(
@@ -117,7 +122,7 @@ def bopt_get_next_parameter(l2_lambdas, results):
     gp = GaussianProcessRegressor(k)
     gp.fit(X, y)
 
-    test_points = np.logspace(-6, 0, 1000)
+    test_points = np.logspace(-4, 0, 1000)
     test_points = np.log(test_points).reshape(-1, 1)
 
     mu, std = gp.predict(test_points, return_std=True)
@@ -152,7 +157,6 @@ def train(train_ds, val_ds, l2_penalty, args):
     likelihood = likelihood.to(device)
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
 
     training_result = {
         "l2_penalty": l2_penalty,
@@ -277,28 +281,53 @@ def train(train_ds, val_ds, l2_penalty, args):
         ss_tot = np.sum((all_targets - np.mean(all_targets)) ** 2)
         r2_score = 1 - ss_res / ss_tot
         training_result["train_r2"] = r2_score.item()
-
         train_mse /= train_count
         training_result["train_mse"] = train_mse
 
-        val_mse = 0
-        val_count = 0
-        all_preds = []
-        all_targets = []
-        for c, e, s, y_batch in val_loader:
-            c, e, s, y_batch = (
-                c.to(device),
-                e.to(device),
-                s.to(device),
-                y_batch.to(device),
-            )
+        if isinstance(val_ds, Subset):
+            val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
+            val_mse = 0
+            val_count = 0
+            all_preds = []
+            all_targets = []
+            for c, e, s, y_batch in val_loader:
+                c, e, s, y_batch = (
+                    c.to(device),
+                    e.to(device),
+                    s.to(device),
+                    y_batch.to(device),
+                )
 
-            pred = model(c, e, s)
-            loss = mse_loss_fn(pred.mean, y_batch)
-            val_mse += loss.item() * y_batch.size(0)
-            val_count += y_batch.size(0)
-            all_preds.extend(pred.mean.cpu().numpy())
-            all_targets.extend(y_batch.cpu().numpy())
+                pred = model(c, e, s)
+                loss = mse_loss_fn(pred.mean, y_batch)
+                val_mse += loss.item() * y_batch.size(0)
+                val_count += y_batch.size(0)
+                all_preds.extend(pred.mean.cpu().numpy())
+                all_targets.extend(y_batch.cpu().numpy())
+
+            val_mse /= val_count
+        else:
+            logger.info("Performing cross-validation")
+            fold_mses = []
+            all_preds = []
+            all_targets = []
+            for fold in val_ds:
+                val_loader = DataLoader(fold, batch_size=len(fold), shuffle=False)
+                for c, e, s, y_batch in val_loader:
+                    c, e, s, y_batch = (
+                        c.to(device),
+                        e.to(device),
+                        s.to(device),
+                        y_batch.to(device),
+                    )
+
+                    pred = likelihood(model(c, e, s))
+                    loss = mse_loss_fn(pred.mean, y_batch)
+                    fold_mses.append(loss.item())
+                    all_preds.extend(pred.mean.cpu().numpy())
+                    all_targets.extend(y_batch.cpu().numpy())
+
+            val_mse = np.median(fold_mses)
 
         # Calc r2 score
         all_preds = np.array(all_preds)
@@ -307,8 +336,6 @@ def train(train_ds, val_ds, l2_penalty, args):
         ss_tot = np.sum((all_targets - np.mean(all_targets)) ** 2)
         r2_score = 1 - ss_res / ss_tot
         training_result["val_r2"] = r2_score.item()
-
-        val_mse /= val_count
         training_result["val_mse"] = val_mse
         training_result["lengthscales"] = (
             model.exp_weight.lengthscale.detach().cpu().numpy().tolist()
@@ -338,17 +365,17 @@ def block_split(gs, num_clusters, output_dir=None):
     indices = np.arange(len(gs))
 
     train_idx = indices[np.isin(kmeans.labels_, clusters[:30])]
-    val_idx = indices[np.isin(kmeans.labels_, clusters[30:40])]
+    val_idx = [indices[kmeans.labels_ == c] for c in clusters[30:40]]
     test_idx = indices[np.isin(kmeans.labels_, clusters[40:])]
 
-    if output_dir is not None:
-        # Create a plot showing the clusters and the train/val/test splits
-        plt.scatter(ac[train_idx, 0], ac[train_idx, 1], label="Train", alpha=0.5)
-        plt.scatter(ac[val_idx, 0], ac[val_idx, 1], label="Val", alpha=0.5)
-        plt.scatter(ac[test_idx, 0], ac[test_idx, 1], label="Test", alpha=0.5)
-        plt.legend()
-        plt.title("KMeans Clusters and Train/Val/Test Splits")
-        plt.savefig(os.path.join(output_dir, "kmeans_clusters.png"))
+    # if output_dir is not None:
+    #     # Create a plot showing the clusters and the train/val/test splits
+    #     plt.scatter(ac[train_idx, 0], ac[train_idx, 1], label="Train", alpha=0.5)
+    #     plt.scatter(ac[val_idx, 0], ac[val_idx, 1], label="Val", alpha=0.5)
+    #     plt.scatter(ac[test_idx, 0], ac[test_idx, 1], label="Test", alpha=0.5)
+    #     plt.legend()
+    #     plt.title("KMeans Clusters and Train/Val/Test Splits")
+    #     plt.savefig(os.path.join(output_dir, "kmeans_clusters.png"))
     return train_idx, val_idx, test_idx
 
 
@@ -436,6 +463,9 @@ if __name__ == "__main__":
         default=51,
         type=int,
         help="The size of the window to use for the input features.",
+    )
+    parser.add_argument(
+        "--test", action="store_true", help="Whether to run in test mode."
     )
     arguments = parser.parse_args()
     main(arguments)
