@@ -100,7 +100,7 @@ def bopt_get_next_parameter(l2_lambdas, results):
     gp = GaussianProcessRegressor(k)
     gp.fit(X, y)
 
-    test_points = np.logspace(-6, 1, 1000)
+    test_points = np.logspace(-6, 0, 1000)
     test_points = np.log(test_points).reshape(-1, 1)
 
     mu, std = gp.predict(test_points, return_std=True)
