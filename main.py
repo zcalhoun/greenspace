@@ -25,18 +25,27 @@ def main(args):
 
     logger.info(args)
 
+    task_id = os.getenv("SLURM_ARRAY_TASK_ID")
+    cities = os.listdir(args.data_dir)
+    city = cities[task_id]
+
+    output_dir = os.path.join(args.output_dir, city)
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
     gs = GreenspaceDataset(
-        args.data_dir,
+        os.path.join(args.data_dir, city),
         greenspace=args.greenspace,
         time=args.time,
         window_size=args.window_size,
     )
 
-    if not os.path.exists(args.output_dir):
-        os.makedirs(args.output_dir)
+    if len(gs) == 0:
+        logger.warning(f"No data found for city {city}. Skipping.")
+        return
 
     logger.info("Performing block split of the data...")
-    train_idx, val_idx, test_idx = block_split(gs, args.num_clusters, args.output_dir)
+    train_idx, val_idx, test_idx = block_split(gs, args.num_clusters, output_dir)
 
     train_dataset = Subset(gs, train_idx)
     val_dataset = Subset(gs, val_idx)
@@ -58,7 +67,7 @@ def main(args):
         )
         logger.info(f"Validation MSE: {train_result['val_mse']}")
         results.append(train_result["val_mse"])
-        save_result(train_result, args.output_dir)
+        save_result(train_result, output_dir)
 
     for i in range(args.bayes_opt_iters):
         # Get the next set of hyperparameters to try
@@ -73,7 +82,7 @@ def main(args):
         logger.info(f"Validation MSE: {train_result['val_mse']}")
         l2_lambdas.append(l2_penalty)
         results.append(train_result["val_mse"])
-        save_result(train_result, args.output_dir)
+        save_result(train_result, output_dir)
 
     #####
     # Final model training with the best hyperparameters
@@ -90,13 +99,13 @@ def main(args):
     )
     logger.info(f"Test MSE with best L2 penalty: {train_result['val_mse']}")
 
-    with open(os.path.join(args.output_dir, "final_result.json"), "w") as f:
+    with open(os.path.join(output_dir, "final_result.json"), "w") as f:
         json.dump(train_result, f)
 
     # Save
-    torch.save(model.state_dict(), os.path.join(args.output_dir, "final_model.pth"))
+    torch.save(model.state_dict(), os.path.join(output_dir, "final_model.pth"))
     torch.save(
-        likelihood.state_dict(), os.path.join(args.output_dir, "final_likelihood.pth")
+        likelihood.state_dict(), os.path.join(output_dir, "final_likelihood.pth")
     )
 
 
