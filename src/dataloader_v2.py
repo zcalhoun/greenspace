@@ -202,8 +202,8 @@ class RasterObject:
         """
         # Transform the gdf to the same CRS as the raster
         gdf_reproj = gdf.to_crs(self.crs)
-        width_buffer = self.transform[0] * self.window_size
-        height_buffer = self.transform[4] * self.window_size
+        width_buffer = np.abs(self.transform[0] * self.window_size)
+        height_buffer = np.abs(self.transform[4] * self.window_size)
 
         gdf_reproj = gdf_reproj.cx[
             self.bounds.left + width_buffer : self.bounds.right - width_buffer,
@@ -212,9 +212,10 @@ class RasterObject:
         return gdf_reproj.to_crs(gdf.crs)
 
     def initialize_coords(self, gdf):
+        gdf_reproj = gdf.to_crs(self.crs)
         transformer = rasterio.transform.AffineTransformer(self.transform)
         self.coords = np.column_stack(
-            transformer.rowcol(gdf.geometry.x, gdf.geometry.y)
+            transformer.rowcol(gdf_reproj.geometry.x, gdf_reproj.geometry.y)
         )
 
     def __getitem__(self, idx):
