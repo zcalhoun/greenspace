@@ -14,7 +14,7 @@ from gpytorch.likelihoods import GaussianLikelihood
 from gpytorch.mlls import VariationalELBO
 
 sys.path.append("./src")
-from dataloader import GreenspaceDataset
+from dataloader_v2 import GreenspaceDataset
 from model import CompleteModel
 from utils import SimpleLogger
 
@@ -25,7 +25,12 @@ def main(args):
 
     logger.info(args)
 
-    gs = GreenspaceDataset(args.data_dir, greenspace=args.greenspace)
+    gs = GreenspaceDataset(
+        args.data_dir,
+        greenspace=args.greenspace,
+        time=args.time,
+        window_size=args.window_size,
+    )
 
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
@@ -37,6 +42,9 @@ def main(args):
     val_dataset = Subset(gs, val_idx)
     test_dataset = Subset(gs, test_idx)
 
+    logger.info(
+        f"Train size: {len(train_dataset)}, Val size: {len(val_dataset)}, Test size: {len(test_dataset)}"
+    )
     ######
     # Initialize the training set up.
     ######
@@ -304,11 +312,7 @@ def train(train_ds, val_ds, l2_penalty, args):
 def block_split(gs, num_clusters, output_dir=None):
 
     # Get coordinates
-    ac = []
-    for i in range(len(gs)):
-        c, _, _, _ = gs[i]
-        ac.append(c)
-    ac = np.stack([c.numpy() for c in ac])
+    ac = gs.coords
 
     # Number of clusters
     k = 50
@@ -409,6 +413,20 @@ if __name__ == "__main__":
         default=0.001,
         type=float,
         help="Minimum improvement threshold for early stopping patience.",
+    )
+    # Add time to be one of ["am", "af", "pm"]
+    parser.add_argument(
+        "--time",
+        default="pm",
+        type=str,
+        choices=["am", "af", "pm"],
+        help="Time of day for the data to use (am, af, pm).",
+    )
+    parser.add_argument(
+        "--window-size",
+        default=51,
+        type=int,
+        help="The size of the window to use for the input features.",
     )
     arguments = parser.parse_args()
     main(arguments)
