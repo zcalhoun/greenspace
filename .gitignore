@@ -9,7 +9,6 @@ asheville/
 results/
 example_models/
 
-
 # testing
 process_asheville.sh
 test_results/
@@ -20,3 +19,4 @@ test_results/
 
 # other
 .DS_Store
+archived_scripts/

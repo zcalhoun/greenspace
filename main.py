@@ -27,7 +27,7 @@ def main(args):
 
     task_id = os.getenv("SLURM_ARRAY_TASK_ID")
     cities = os.listdir(args.data_dir)
-    city = cities[task_id]
+    city = cities[int(task_id)]
 
     output_dir = os.path.join(args.output_dir, city)
     if not os.path.exists(output_dir):
