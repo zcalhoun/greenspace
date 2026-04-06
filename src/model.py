@@ -15,9 +15,11 @@ class Exponential(nn.Module):
 
         idxs = torch.arange(0 - size // 2, size // 2 + 1, dtype=torch.float)
         points = torch.meshgrid(idxs, idxs, indexing="ij")
-        self.dist = torch.sqrt(points[0] ** 2 + points[1] ** 2)
-        self.dist[size // 2, size // 2] = 1e6
-        self.dist = self.dist.ravel()
+        dist = torch.sqrt(points[0] ** 2 + points[1] ** 2)
+        dist[size // 2, size // 2] = 1e6
+        dist = dist.ravel()
+        # Register the parameter
+        self.register_buffer("dist", dist)
 
     def forward(self, x):
         """
