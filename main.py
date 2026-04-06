@@ -17,10 +17,11 @@ from dataloader import GreenspaceDataset
 from model import CompleteModel
 from utils import SimpleLogger
 
+logger = SimpleLogger()
+
 
 def main(args):
 
-    logger = SimpleLogger()
     logger.info(args)
 
     gs = GreenspaceDataset(args.data_dir, greenspace=args.greenspace)
@@ -150,7 +151,7 @@ def train(train_ds, val_ds, l2_penalty, args):
             optimizer.step()
             epoch_train_loss += loss.item() * y_batch.size(0)
             epoch_train_count += y_batch.size(0)
-        print(
+        logger.info(
             f"Pretrain Epoch {i+1}/{args.pretrain_epochs}, Loss: {epoch_train_loss/epoch_train_count}"
         )
 
@@ -199,9 +200,9 @@ def train(train_ds, val_ds, l2_penalty, args):
         else:
             patience_counter += 1
 
-        print(f"Epoch {i+1}/{args.epochs}, Train Loss: {train_loss:.4f}")
+        logger.info(f"Epoch {i+1}/{args.epochs}, Train Loss: {train_loss:.4f}")
         if patience_counter >= args.patience:
-            print("Early stopping triggered.")
+            logger.info("Early stopping triggered.")
             break
 
     model.eval()

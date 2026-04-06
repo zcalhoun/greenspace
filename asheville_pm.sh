@@ -14,4 +14,6 @@ conda activate svgp
 
 python main.py \
     --data-dir /work/zdc6/greenspace/data/w51/asheville/pm/ \
-    --output-dir /work/zdc6/greenspace/results/w51/pm/ng/asheville/
+    --output-dir /work/zdc6/greenspace/results/w51/pm/ng/asheville/ \
+    --patience 3 \
+    
