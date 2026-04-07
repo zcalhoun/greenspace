@@ -36,28 +36,22 @@ def main(args):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    gs = GreenspaceDataset(
-        os.path.join(args.data_dir, city),
-        greenspace=args.greenspace,
-        time=args.time,
-        window_size=args.window_size,
-    )
-
-    if len(gs) == 0:
-        logger.warning(f"No data found for city {city}. Skipping.")
+    try:
+        gs = GreenspaceDataset(
+            os.path.join(args.data_dir, city),
+            greenspace=args.greenspace,
+            time=args.time,
+            window_size=args.window_size,
+        )
+    except ValueError as e:
+        logger.error(f"Problem opening up dataset for {city}: {e}")
         return
 
     logger.info("Performing block split of the data...")
-    train_idx, val_idx, test_idx = block_split(gs, args.num_clusters, output_dir)
-
-    train_dataset = Subset(gs, train_idx)
-    val_dataset = [
-        Subset(gs, v) for v in val_idx
-    ]  # array for contiguous blocks of data
-    test_dataset = Subset(gs, test_idx)
+    train_idx, test_idx = block_split(gs, args.num_clusters)
 
     logger.info(
-        f"Train size: {len(train_dataset)}, Val size: {len(val_dataset)}, Test size: {len(test_dataset)}"
+        f"Train size: {len(np.concatenate(train_idx))}, Test size: {len(test_idx)}"
     )
     ######
     # Initialize the training set up.
@@ -67,12 +61,14 @@ def main(args):
     results = []
     for l2_penalty in l2_lambdas:
         logger.info(f"Training with L2 penalty: {l2_penalty}")
-        train_result, model, likelihood = train(
-            train_dataset, val_dataset, l2_penalty, args
-        )
-        logger.info(f"Validation MSE: {train_result['val_mse']}")
-        results.append(train_result["val_mse"])
-        save_result(train_result, output_dir)
+
+        cross_val_result = cross_validation(gs, train_idx, l2_penalty, args)
+        # train_result, model, likelihood = train(
+        #     train_dataset, val_dataset, l2_penalty, args
+        # )
+        logger.info(f"Validation MSE: {cross_val_result['val_mse_mean']}")
+        results.append(cross_val_result["val_mse_mean"])
+        save_result(cross_val_result, output_dir)
 
     for i in range(args.bayes_opt_iters):
         # Get the next set of hyperparameters to try
@@ -81,13 +77,15 @@ def main(args):
         l2_penalty = bopt_get_next_parameter(l2_lambdas, results)
         logger.info(f"Next L2 penalty to try: {l2_penalty}")
         # Train the model with these hyperparameters
-        train_result, model, likelihood = train(
-            train_dataset, val_dataset, l2_penalty, args
-        )
-        logger.info(f"Validation MSE: {train_result['val_mse']}")
+        # train_result, model, likelihood = train(
+        #     train_dataset, val_dataset, l2_penalty, args
+        # )
+
+        cross_val_result = cross_validation(gs, train_idx, l2_penalty, args)
+        logger.info(f"Validation MSE: {cross_val_result['val_mse_mean']}")
         l2_lambdas.append(l2_penalty)
-        results.append(train_result["val_mse"])
-        save_result(train_result, output_dir)
+        results.append(cross_val_result["val_mse_mean"])
+        save_result(cross_val_result, output_dir)
 
     #####
     # Final model training with the best hyperparameters
@@ -98,6 +96,9 @@ def main(args):
 
     full_train_idx = np.concatenate([train_idx, np.concatenate(val_idx)])
     full_train_dataset = Subset(gs, full_train_idx)
+
+    # Saving this for later use.
+    test_dataset = Subset(gs, test_idx)
 
     train_result, model, likelihood = train(
         full_train_dataset, test_dataset, best_l2_penalty, args
@@ -112,6 +113,40 @@ def main(args):
     torch.save(
         likelihood.state_dict(), os.path.join(output_dir, "final_likelihood.pth")
     )
+
+
+def cross_validation(gs, train_idx, l2_penalty, args, folds=5):
+    """
+    This function creates a separate dataloader based on splitting the
+    training index, then trains the model on 5 folds, so we can get
+    a less noisy estimate of the model's performance.
+    """
+
+    training_errs = []
+    validation_errs = []
+    num_per_fold = len(train_idx) // folds
+    for i in range(folds):
+        logger.info(f"On CV fold {i} for L2 penalty {l2_penalty}...")
+        cv_train = train_idx.copy()
+        cv_val = np.concatenate(
+            [cv_train.pop(i * num_per_fold) for j in range(num_per_fold)]
+        )
+        cv_train = np.concatenate(cv_train)
+
+        train_ds = Subset(gs, cv_train)
+        val_ds = Subset(gs, cv_val)
+
+        # We just need the train_mse and the val_mse
+        cv_result, _, _ = train(train_ds, val_ds, l2_penalty, args)
+        training_errs.append(cv_result["train_mse"])
+        validation_errs.append(cv_result["val_mse"])
+
+    return {
+        "train_mse_mean": np.mean(training_errs).item(),
+        "train_mse_std": np.std(training_errs).item(),
+        "val_mse_mean": np.mean(validation_errs).item(),
+        "val_mse_std": np.std(validation_errs).item(),
+    }
 
 
 def bopt_get_next_parameter(l2_lambdas, results):
@@ -329,6 +364,7 @@ def train(train_ds, val_ds, l2_penalty, args):
 
             val_mse = np.median(fold_mses)
 
+        logger.info(f"Validation MSE: {val_mse}")
         # Calc r2 score
         all_preds = np.array(all_preds)
         all_targets = np.array(all_targets)
@@ -345,38 +381,34 @@ def train(train_ds, val_ds, l2_penalty, args):
     return training_result, model, likelihood
 
 
-def block_split(gs, num_clusters, output_dir=None):
+def block_split(gs, num_clusters):
+    """
+    This function applies KMeans to the coordinates to split the data
+    into a train and test dataset.
+
+    The training dataset is an array of indices in each cluster, which is then
+    used for performing 5-fold cross-validation.
+
+    The training dataset is just the array of indices.
+    """
 
     # Get coordinates
     ac = gs.coords
 
-    # Number of clusters
-    k = 50
-    # Fit KMeans
+    kmeans = KMeans(n_clusters=num_clusters, random_state=0).fit(ac)
 
-    kmeans = KMeans(n_clusters=k, random_state=0).fit(ac)
-
-    # Randomly sample 30 clusters
-
-    clusters = np.arange(50)
+    clusters = np.arange(num_clusters)
     np.random.seed(0)
     np.random.shuffle(clusters)
 
     indices = np.arange(len(gs))
 
-    train_idx = indices[np.isin(kmeans.labels_, clusters[:30])]
-    val_idx = [indices[kmeans.labels_ == c] for c in clusters[30:40]]
-    test_idx = indices[np.isin(kmeans.labels_, clusters[40:])]
+    training_size = int(num_clusters * 0.8)
 
-    # if output_dir is not None:
-    #     # Create a plot showing the clusters and the train/val/test splits
-    #     plt.scatter(ac[train_idx, 0], ac[train_idx, 1], label="Train", alpha=0.5)
-    #     plt.scatter(ac[val_idx, 0], ac[val_idx, 1], label="Val", alpha=0.5)
-    #     plt.scatter(ac[test_idx, 0], ac[test_idx, 1], label="Test", alpha=0.5)
-    #     plt.legend()
-    #     plt.title("KMeans Clusters and Train/Val/Test Splits")
-    #     plt.savefig(os.path.join(output_dir, "kmeans_clusters.png"))
-    return train_idx, val_idx, test_idx
+    train_idx = [indices[kmeans.labels_ == c] for c in clusters[:training_size]]
+    test_idx = indices[np.isin(kmeans.labels_, clusters[training_size:])]
+
+    return train_idx, test_idx
 
 
 if __name__ == "__main__":

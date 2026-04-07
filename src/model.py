@@ -62,7 +62,11 @@ class CompleteModel(nn.Module):
     """
 
     def __init__(
-        self, num_dims=31, num_inducing_points=20, size=51, intercept=torch.tensor(15.0)
+        self,
+        num_dims=31,
+        num_inducing_points=100,
+        size=51,
+        intercept=torch.tensor(15.0),
     ):
         super().__init__()
 
