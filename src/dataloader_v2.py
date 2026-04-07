@@ -7,8 +7,8 @@ import os
 import json
 
 import numpy as np
-import geopandas as gpd
 import rasterio
+import geopandas as gpd
 from rasterio.transform import AffineTransformer
 
 import torch
