@@ -56,7 +56,10 @@ def main(args):
     ######
     # Initialize the training set up.
     ######
-    l2_lambdas = [1e-4, 1e-3, 1e-2, 1e-1, 1]
+    if args.test:
+        l2_lambdas = [1e-2]
+    else:
+        l2_lambdas = [1e-4, 1e-3, 1e-2, 1e-1, 1]
 
     results = []
     for l2_penalty in l2_lambdas:
@@ -94,14 +97,12 @@ def main(args):
     logger.info(f"Best L2 penalty found: {best_l2_penalty}")
     # combine training and validation datasets for final training
 
-    full_train_idx = np.concatenate([train_idx, np.concatenate(val_idx)])
-    full_train_dataset = Subset(gs, full_train_idx)
-
-    # Saving this for later use.
+    # full_train_idx = np.concatenate([train_idx, np.concatenate(val_idx)])
+    train_dataset = Subset(gs, np.concatenate(train_idx))
     test_dataset = Subset(gs, test_idx)
 
     train_result, model, likelihood = train(
-        full_train_dataset, test_dataset, best_l2_penalty, args
+        train_dataset, test_dataset, best_l2_penalty, args
     )
     logger.info(f"Test MSE with best L2 penalty: {train_result['val_mse']}")
 
@@ -142,6 +143,7 @@ def cross_validation(gs, train_idx, l2_penalty, args, folds=5):
         validation_errs.append(cv_result["val_mse"])
 
     return {
+        "l2_penalty": l2_penalty,
         "train_mse_mean": np.mean(training_errs).item(),
         "train_mse_std": np.std(training_errs).item(),
         "val_mse_mean": np.mean(validation_errs).item(),
