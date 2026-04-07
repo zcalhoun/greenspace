@@ -4,7 +4,6 @@ import argparse
 import sys
 
 import numpy as np
-import pandas as pd
 
 # from matplotlib import pyplot as plt
 from sklearn.cluster import KMeans
@@ -19,6 +18,8 @@ sys.path.append("./src")
 from dataloader_v2 import GreenspaceDataset
 from model import CompleteModel
 from utils import SimpleLogger
+
+import pandas as pd
 
 logger = SimpleLogger()
 
