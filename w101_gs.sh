@@ -4,8 +4,7 @@
 #SBATCH --array=0-21
 #SBATCH --mail-user=zachary.calhoun@duke.edu
 #SBATCH --mail-type=BEGIN,END,FAIL
-#SBATCH -p scavenger-gpu
-#SBATCH --account=carlsonlab
+#SBATCH -p carlsonlab-gpu
 #SBATCH --gres=gpu:1
 #SBATCH --mem=64G
 #SBATCH --output=./w101gs/%a.txt
