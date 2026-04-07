@@ -4,6 +4,7 @@ import argparse
 import sys
 
 import numpy as np
+import pandas as pd
 from matplotlib import pyplot as plt
 from sklearn.cluster import KMeans
 from sklearn.gaussian_process import GaussianProcessRegressor, kernels
@@ -33,8 +34,11 @@ def main(args):
         city = cities[int(task_id)]
 
     output_dir = os.path.join(args.output_dir, city)
+    retry = False
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
+    else:
+        retry = True
 
     try:
         gs = GreenspaceDataset(
@@ -61,19 +65,41 @@ def main(args):
     else:
         l2_lambdas = [1e-4, 1e-3, 1e-2, 1e-1, 1]
 
-    results = []
-    for l2_penalty in l2_lambdas:
-        logger.info(f"Training with L2 penalty: {l2_penalty}")
+    if retry:
+        # Get the result, in the case that the job was cancelled.
+        saved_results, saved_lambdas = get_last_result(output_dir)
+        if len(saved_results) != 0:
+            results = saved_results
+        else:
+            results = []
+    else:
+        results = []
+        saved_lambdas = []
 
-        cross_val_result = cross_validation(gs, train_idx, l2_penalty, args)
-        # train_result, model, likelihood = train(
-        #     train_dataset, val_dataset, l2_penalty, args
-        # )
-        logger.info(f"Validation MSE: {cross_val_result['val_mse_mean']}")
-        results.append(cross_val_result["val_mse_mean"])
-        save_result(cross_val_result, output_dir)
+    if len(results) < len(l2_lambdas):
+        for l2_penalty in l2_lambdas:
+            if l2_penalty in saved_lambdas:
+                continue
+            logger.info(f"Training with L2 penalty: {l2_penalty}")
 
-    for i in range(args.bayes_opt_iters):
+            cross_val_result = cross_validation(gs, train_idx, l2_penalty, args)
+            # train_result, model, likelihood = train(
+            #     train_dataset, val_dataset, l2_penalty, args
+            # )
+            logger.info(f"Validation MSE: {cross_val_result['val_mse_mean']}")
+            results.append(cross_val_result["val_mse_mean"])
+            save_result(cross_val_result, output_dir)
+    else:
+        print("Skipping initial iterations...")
+        l2_lambdas = saved_lambdas
+
+    # Calculate number of iterations
+    if args.test:
+        num_bayes_opt = 1 + args.bayes_opt_iters - len(l2_lambdas)
+    else:
+        num_bayes_opt = 5 + args.bayes_opt_iters - len(l2_lambdas)
+
+    for i in range(num_bayes_opt):
         # Get the next set of hyperparameters to try
         logger.info(f"Bayesian optimization iteration {i + 1}")
 
@@ -114,6 +140,21 @@ def main(args):
     torch.save(
         likelihood.state_dict(), os.path.join(output_dir, "final_likelihood.pth")
     )
+
+
+def get_last_result(output_dir):
+    try:
+        output_path = os.path.join(output_dir, "training_results.jsonl")
+        df = pd.read_json(output_path, lines=True)
+
+        results = df["val_mse_mean"].values.tolist()
+        l2_lambdas = df["l2_penalty"].values.tolist()
+
+        return results, l2_lambdas
+    except Exception as e:
+        print(e)
+        logger.info(f"No files found")
+        return [], []
 
 
 def cross_validation(gs, train_idx, l2_penalty, args, folds=5):
