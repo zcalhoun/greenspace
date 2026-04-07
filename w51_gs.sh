@@ -20,4 +20,4 @@ python main.py \
     --greenspace \
     --batch-size 1024 \
     --pretrain-lr 0.1 \
-    --lr 0.1
+    --lr 0.01
