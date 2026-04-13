@@ -323,9 +323,7 @@ def train(
         ],
         lr=args.lr,
     )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs
-    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     mll = VariationalELBO(likelihood, model.gp_layer, num_data=len(train_ds))
     best_train_loss = float("inf")
     patience_counter = 0
@@ -598,7 +596,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-workers",
         type=int,
-        default=4,
+        default=2,
         help="Number of DataLoader worker processes.",
     )
     parser.add_argument(
