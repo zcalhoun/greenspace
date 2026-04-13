@@ -1,5 +1,6 @@
 # environment
 .venv/
+CLAUDE.md
 
 # data
 data/
@@ -15,7 +16,7 @@ test_results/
 
 
 # C code
-*/__pycache__
+__pycache__
 
 # other
 .DS_Store

@@ -43,6 +43,15 @@ _GREEN_CLASSES = [0, 2, 4, 6, 8, 10, 12, 13, 14]
 class GreenspaceDataset(Dataset):
     """ """
 
+    # Precomputed LUTs: raw raster value → class index
+    _NLCD_LUT = torch.zeros(max(_NLCD_CLASSES) + 1, dtype=torch.long)
+    for _idx, _val in enumerate(_NLCD_CLASSES):
+        _NLCD_LUT[_val] = _idx
+
+    _GS_LUT = torch.zeros(max(_GREEN_CLASSES) + 1, dtype=torch.long)
+    for _idx, _val in enumerate(_GREEN_CLASSES):
+        _GS_LUT[_val] = _idx
+
     def __init__(self, data_dir=None, greenspace=False, time="pm", window_size=51):
         """
         Data_dir is the directory of the source data.
@@ -150,13 +159,13 @@ class GreenspaceDataset(Dataset):
         ndvi_albedo_window = torch.clamp(ndvi_albedo_window, 0.0, 1.0)
         temp = torch.tensor(self.temp[idx], dtype=torch.float32)
 
-        nlcd_oh = self._create_one_hot(nlcd_window, _NLCD_CLASSES).permute(
+        nlcd_oh = self._create_one_hot(nlcd_window, self._NLCD_LUT, len(_NLCD_CLASSES)).permute(
             2, 0, 1
         )  # (C, H, W)
 
         if self.return_greenspace:
             greenspace_window = torch.from_numpy(self.greenspace[idx]).long()
-            gs_oh = self._create_one_hot(greenspace_window, _GREEN_CLASSES).permute(
+            gs_oh = self._create_one_hot(greenspace_window, self._GS_LUT, len(_GREEN_CLASSES)).permute(
                 2, 0, 1
             )  # (C, H, W)
 
@@ -167,11 +176,9 @@ class GreenspaceDataset(Dataset):
 
         return coords, elev, stacked_window, temp
 
-    def _create_one_hot(self, window, class_values):
-        indices = torch.zeros_like(window)
-        for idx, val in enumerate(class_values):
-            indices[window == val] = idx
-        return F.one_hot(indices, num_classes=len(class_values)).float()
+    def _create_one_hot(self, window, lut, num_classes):
+        indices = lut[window]
+        return F.one_hot(indices, num_classes=num_classes).float()
 
 
 def load_metadata(meta_path: str):

@@ -180,8 +180,15 @@ def cross_validation(gs, train_idx, l2_penalty, args, folds=5):
         train_ds = Subset(gs, cv_train)
         val_ds = Subset(gs, cv_val)
 
-        # We just need the train_mse and the val_mse
-        cv_result, _, _ = train(train_ds, val_ds, l2_penalty, args)
+        # Use fewer inducing points and pretrain epochs during CV to save time
+        cv_result, _, _ = train(
+            train_ds,
+            val_ds,
+            l2_penalty,
+            args,
+            num_inducing_points=max(10, args.num_inducing_points // 2),
+            pretrain_epochs=max(1, args.pretrain_epochs // 2),
+        )
         training_errs.append(cv_result["train_mse"])
         validation_errs.append(cv_result["val_mse"])
 
@@ -219,24 +226,38 @@ def save_result(train_result, output_dir):
         f.write("\n")
 
 
-def train(train_ds, val_ds, l2_penalty, args):
+def train(train_ds, val_ds, l2_penalty, args, num_inducing_points=None, pretrain_epochs=None):
     """
     Fit a model and return the best outcome.
     """
+
+    if num_inducing_points is None:
+        num_inducing_points = args.num_inducing_points
+    if pretrain_epochs is None:
+        pretrain_epochs = args.pretrain_epochs
 
     model = CompleteModel(
         size=train_ds.dataset.window_size,
         num_dims=train_ds.dataset.num_dims,
         intercept=train_ds.dataset.init_temp,
+        num_inducing_points=num_inducing_points,
     )
     likelihood = GaussianLikelihood()
 
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
+    use_amp = args.amp and use_cuda
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
     model = model.to(device)
     likelihood = likelihood.to(device)
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=use_cuda,
+    )
 
     training_result = {
         "l2_penalty": l2_penalty,
@@ -254,7 +275,7 @@ def train(train_ds, val_ds, l2_penalty, args):
     ######
     mse_loss_fn = torch.nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.pretrain_lr)
-    for i in range(args.pretrain_epochs):
+    for i in range(pretrain_epochs):
         model.train()
         likelihood.train()
 
@@ -268,15 +289,17 @@ def train(train_ds, val_ds, l2_penalty, args):
                 y_batch.to(device),
             )
             optimizer.zero_grad()
-            output = model(c, e, s, pretrain=True)
-            loss = mse_loss_fn(output, y_batch)
-            loss += l2_penalty * model.beta.norm()
-            loss.backward()
-            optimizer.step()
+            with torch.autocast(device_type=device.type, enabled=use_amp):
+                output = model(c, e, s, pretrain=True)
+                loss = mse_loss_fn(output, y_batch)
+                loss += l2_penalty * model.beta.norm()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             epoch_train_loss += loss.item() * y_batch.size(0)
             epoch_train_count += y_batch.size(0)
         logger.info(
-            f"Pretrain Epoch {i+1}/{args.pretrain_epochs}, Loss: {epoch_train_loss/epoch_train_count}"
+            f"Pretrain Epoch {i+1}/{pretrain_epochs}, Loss: {epoch_train_loss/epoch_train_count}"
         )
         training_result["train_loss"].append(epoch_train_loss / epoch_train_count)
 
@@ -308,11 +331,13 @@ def train(train_ds, val_ds, l2_penalty, args):
                 y_batch.to(device),
             )
             optimizer.zero_grad()
-            output = model(c, e, s)
-            loss = -mll(output, y_batch)
-            loss += l2_penalty * model.beta.norm()
-            loss.backward()
-            optimizer.step()
+            with torch.autocast(device_type=device.type, enabled=use_amp):
+                output = model(c, e, s)
+                loss = -mll(output, y_batch)
+                loss += l2_penalty * model.beta.norm()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             epoch_train_loss += loss.item() * y_batch.size(0)
             epoch_train_count += y_batch.size(0)
 
@@ -365,7 +390,13 @@ def train(train_ds, val_ds, l2_penalty, args):
         training_result["train_mse"] = train_mse
 
         if isinstance(val_ds, Subset):
-            val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
+            val_loader = DataLoader(
+                val_ds,
+                batch_size=args.batch_size,
+                shuffle=False,
+                num_workers=args.num_workers,
+                pin_memory=use_cuda,
+            )
             val_mse = 0
             val_count = 0
             all_preds = []
@@ -492,7 +523,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=64,
+        default=256,
         help="The batch size number to use for training.",
     )
     parser.add_argument(
@@ -543,6 +574,23 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--test", action="store_true", help="Whether to run in test mode."
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=4,
+        help="Number of DataLoader worker processes.",
+    )
+    parser.add_argument(
+        "--num-inducing-points",
+        type=int,
+        default=100,
+        help="Number of GP inducing points for the final model (CV uses half).",
+    )
+    parser.add_argument(
+        "--amp",
+        action="store_true",
+        help="Enable automatic mixed precision (CUDA only).",
     )
     arguments = parser.parse_args()
     main(arguments)
