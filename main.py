@@ -226,7 +226,9 @@ def save_result(train_result, output_dir):
         f.write("\n")
 
 
-def train(train_ds, val_ds, l2_penalty, args, num_inducing_points=None, pretrain_epochs=None):
+def train(
+    train_ds, val_ds, l2_penalty, args, num_inducing_points=None, pretrain_epochs=None
+):
     """
     Fit a model and return the best outcome.
     """
@@ -247,7 +249,7 @@ def train(train_ds, val_ds, l2_penalty, args, num_inducing_points=None, pretrain
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
     use_amp = args.amp and use_cuda
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    scaler = torch.amp.GradScaler(enabled=use_amp)
     model = model.to(device)
     likelihood = likelihood.to(device)
 
@@ -275,6 +277,9 @@ def train(train_ds, val_ds, l2_penalty, args, num_inducing_points=None, pretrain
     ######
     mse_loss_fn = torch.nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.pretrain_lr)
+    pretrain_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=args.lr_factor, patience=args.lr_patience
+    )
     for i in range(pretrain_epochs):
         model.train()
         likelihood.train()
@@ -294,6 +299,9 @@ def train(train_ds, val_ds, l2_penalty, args, num_inducing_points=None, pretrain
                 loss = mse_loss_fn(output, y_batch)
                 loss += l2_penalty * model.beta.norm()
             scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            if args.grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             scaler.step(optimizer)
             scaler.update()
             epoch_train_loss += loss.item() * y_batch.size(0)
@@ -301,7 +309,9 @@ def train(train_ds, val_ds, l2_penalty, args, num_inducing_points=None, pretrain
         logger.info(
             f"Pretrain Epoch {i+1}/{pretrain_epochs}, Loss: {epoch_train_loss/epoch_train_count}"
         )
-        training_result["train_loss"].append(epoch_train_loss / epoch_train_count)
+        train_loss = epoch_train_loss / epoch_train_count
+        training_result["train_loss"].append(train_loss)
+        pretrain_scheduler.step(train_loss)
 
     ######
     ## MAIN TRAINING LOOP
@@ -312,6 +322,9 @@ def train(train_ds, val_ds, l2_penalty, args, num_inducing_points=None, pretrain
             {"params": likelihood.parameters()},
         ],
         lr=args.lr,
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=args.epochs
     )
     mll = VariationalELBO(likelihood, model.gp_layer, num_data=len(train_ds))
     best_train_loss = float("inf")
@@ -336,6 +349,12 @@ def train(train_ds, val_ds, l2_penalty, args, num_inducing_points=None, pretrain
                 loss = -mll(output, y_batch)
                 loss += l2_penalty * model.beta.norm()
             scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            if args.grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    list(model.parameters()) + list(likelihood.parameters()),
+                    args.grad_clip,
+                )
             scaler.step(optimizer)
             scaler.update()
             epoch_train_loss += loss.item() * y_batch.size(0)
@@ -343,6 +362,7 @@ def train(train_ds, val_ds, l2_penalty, args, num_inducing_points=None, pretrain
 
         train_loss = epoch_train_loss / epoch_train_count
         training_result["train_loss"].append(train_loss)
+        scheduler.step()
 
         if train_loss < best_train_loss:
             if best_train_loss - train_loss < args.threshold:
@@ -591,6 +611,24 @@ if __name__ == "__main__":
         "--amp",
         action="store_true",
         help="Enable automatic mixed precision (CUDA only).",
+    )
+    parser.add_argument(
+        "--grad-clip",
+        type=float,
+        default=1.0,
+        help="Max gradient norm for clipping (0 to disable).",
+    )
+    parser.add_argument(
+        "--lr-factor",
+        type=float,
+        default=0.5,
+        help="Factor by which ReduceLROnPlateau reduces the pre-training learning rate.",
+    )
+    parser.add_argument(
+        "--lr-patience",
+        type=int,
+        default=3,
+        help="Epochs with no improvement before ReduceLROnPlateau reduces pre-training LR.",
     )
     arguments = parser.parse_args()
     main(arguments)
