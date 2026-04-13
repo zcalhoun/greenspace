@@ -21,5 +21,4 @@ python main.py \
     --batch-size 256 \
     --pretrain-lr 0.1 \
     --lr 0.05 \
-    --window-size 101 \
-    --amp
+    --window-size 101 
