@@ -9,11 +9,12 @@ asheville/
 # results
 results/
 example_models/
+notebooks/
 
 # testing
 process_asheville.sh
 test_results/
-
+test_fit.sh
 
 # C code
 __pycache__
