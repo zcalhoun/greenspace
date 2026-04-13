@@ -1,14 +1,14 @@
 #!/bin/bash
 
-#SBATCH --job-name=amgs_w101
-#SBATCH --array=0
+#SBATCH --job-name=pm_gs_w101
+#SBATCH --array=0-21
 #SBATCH --mail-user=zachary.calhoun@duke.edu
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH -p scavenger-gpu
 #SBATCH --gres=gpu:1
 #SBATCH --mem=8G
-#SBATCH --output=./amgs_w101/%a.txt
-#SBATCH --error=./amgs_w101/%a.err
+#SBATCH --output=./pm_gs_w101/%a.txt
+#SBATCH --error=./pm_gs_w101/%a.err
 
 source ~/.bashrc
 conda activate svgp
