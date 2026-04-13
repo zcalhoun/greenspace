@@ -1,6 +1,8 @@
 # environment
 .venv/
 CLAUDE.md
+.obsidian
+notes/
 
 # data
 data/
