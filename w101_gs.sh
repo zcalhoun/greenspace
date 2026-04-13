@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #SBATCH --job-name=amgs_w101
-#SBATCH --array=0-21
+#SBATCH --array=0
 #SBATCH --mail-user=zachary.calhoun@duke.edu
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH -p scavenger-gpu
@@ -18,7 +18,7 @@ python main.py \
     --output-dir /work/zdc6/greenspace/results/w101/pm/gs/ \
     --patience 3 \
     --greenspace \
-    --batch-size 1024 \
+    --batch-size 512 \
     --pretrain-lr 0.1 \
     --lr 0.05 \
     --window-size 101 \
