@@ -193,8 +193,8 @@ def cross_validation(gs, train_idx, l2_penalty, args, folds=5):
             val_ds,
             l2_penalty,
             args,
-            num_inducing_points=max(10, args.num_inducing_points // 2),
-            pretrain_epochs=max(1, args.pretrain_epochs // 2),
+            num_inducing_points=args.num_inducing_points,
+            pretrain_epochs=1, args.pretrain_epochs,
         )
         training_errs.append(cv_result["train_mse"])
         validation_errs.append(cv_result["val_mse"])
@@ -293,8 +293,8 @@ def _lstsq_init(model, train_loader, device, l2_penalty):
             all_X.append(X.cpu().float())
             all_y.append(y_batch.cpu().float())
 
-    X = torch.cat(all_X, dim=0)   # (N, 1 + num_dims*2 + 1)
-    y = torch.cat(all_y, dim=0)   # (N,)
+    X = torch.cat(all_X, dim=0)  # (N, 1 + num_dims*2 + 1)
+    y = torch.cat(all_y, dim=0)  # (N,)
 
     # Ridge normal equations: (X^T X + λI) w = X^T y
     # Don't regularize the intercept (last column)
@@ -733,8 +733,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-inducing-points",
         type=int,
-        default=100,
-        help="Number of GP inducing points for the final model (CV uses half).",
+        default=10,
+        help="Number of GP inducing points for the final model.",
     )
     parser.add_argument(
         "--amp",

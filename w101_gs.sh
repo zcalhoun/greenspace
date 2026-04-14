@@ -18,8 +18,9 @@ python main.py \
     --output-dir /work/zdc6/greenspace/results/w101/pm/gs/ \
     --patience 3 \
     --greenspace \
-    --batch-size 128 \
-    --pretrain-lr 0.01 \
-    --lr 0.01 \
+    --batch-size 64 \
+    --pretrain-lr 0.1 \
+    --lr 0.1 \
     --window-size 101 \
-    --epochs 10
+    --epochs 10 \
+    --pretrain-epochs 2
