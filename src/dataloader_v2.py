@@ -10,10 +10,36 @@ import numpy as np
 import rasterio
 import geopandas as gpd
 from rasterio.transform import AffineTransformer
+from pyproj import Transformer, Geod
 
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+
+
+def _pixel_size_metres(raster_obj):
+    """
+    Return the pixel size in metres for a raster, regardless of its CRS.
+    Steps one pixel in the y (latitude) direction from the raster midpoint,
+    since GEE exports use the y-direction metres-per-degree (111,320 m/°) when
+    converting a scale parameter to geographic pixel size. Measuring in x would
+    give cos(lat)-compressed values at mid-latitudes.
+    """
+    t = raster_obj.transform
+    bounds = raster_obj.bounds
+    cx = (bounds.left + bounds.right) / 2
+    cy = (bounds.bottom + bounds.top) / 2
+    # Step one pixel upward (y direction)
+    cy2 = cy + abs(t[4])
+
+    to_wgs84 = Transformer.from_crs(raster_obj.crs, "EPSG:4326", always_xy=True)
+    lon1, lat1 = to_wgs84.transform(cx, cy)
+    lon2, lat2 = to_wgs84.transform(cx, cy2)
+
+    geod = Geod(ellps="WGS84")
+    _, _, dist_m = geod.inv(lon1, lat1, lon2, lat2)
+    return float(dist_m)
+
 
 _NLCD_CLASSES = [
     11,
@@ -103,6 +129,24 @@ class GreenspaceDataset(Dataset):
 
     def __len__(self):
         return len(self.temp)
+
+    @property
+    def dimension_resolution(self):
+        """
+        Returns a 1D numpy array of metres-per-pixel for each feature channel,
+        in the same order they are stacked in __getitem__:
+          NLCD (20 channels) | [Greenspace (9 channels)] | NDVI + Albedo (2 channels)
+        The pixel size is taken as the absolute x-pixel size from each raster's
+        affine transform, which is in metres for projected CRS.
+        """
+        nlcd_res = _pixel_size_metres(self.nlcd)
+        resolutions = [nlcd_res] * len(_NLCD_CLASSES)
+        if self.return_greenspace:
+            gs_res = _pixel_size_metres(self.greenspace)
+            resolutions += [gs_res] * len(_GREEN_CLASSES)
+        ndvi_res = _pixel_size_metres(self.ndvi_albedo)
+        resolutions += [ndvi_res] * 2  # NDVI, albedo
+        return np.array(resolutions, dtype=np.float32)
 
     def _extract_coords(self, gdf):
         coords = [

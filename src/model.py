@@ -9,24 +9,46 @@ from gpytorch.distributions import MultivariateNormal
 
 
 class Exponential(nn.Module):
-    def __init__(self, size=51, lengthscale=15.0, num_dims=31):
+    def __init__(
+        self, size=51, lengthscale=500.0, num_dims=31, dimension_resolution=None
+    ):
+        """
+        Args:
+            size:                 window side length in pixels
+            lengthscale:          initial lengthscale in metres (single learned scalar,
+                                  stored in log-space to keep it strictly positive)
+            num_dims:             number of feature channels
+            dimension_resolution: (num_dims,) tensor of metres-per-pixel for each
+                                  channel; defaults to 1.0 (pixel units) if None
+        """
         super().__init__()
-        self.lengthscale = nn.Parameter(lengthscale * torch.ones(num_dims, 1))
+        self.log_lengthscale = nn.Parameter(torch.tensor(float(lengthscale)).log())
 
         idxs = torch.arange(0 - size // 2, size // 2 + 1, dtype=torch.float)
         points = torch.meshgrid(idxs, idxs, indexing="ij")
         dist = torch.sqrt(points[0] ** 2 + points[1] ** 2)
         dist[size // 2, size // 2] = 1e6
         dist = dist.ravel()
-        # Register the parameter
         self.register_buffer("dist", dist)
+
+        if dimension_resolution is not None:
+            res = dimension_resolution.float().view(num_dims, 1)
+        else:
+            res = torch.ones(num_dims, 1)
+        self.register_buffer("dimension_resolution", res)
+
+    @property
+    def lengthscale(self):
+        return self.log_lengthscale.exp()
 
     def forward(self, x):
         """
-        Assumes that x is [batch_size, num_features, size * size]
-
+        Args:
+            x: [batch_size, num_features, size * size]
         """
-        w = torch.exp(-self.dist / self.lengthscale)
+        # Scale pixel distances to metres per channel → (num_dims, size*size)
+        dist_metres = self.dist * self.dimension_resolution
+        w = torch.exp(-dist_metres / self.lengthscale)
         w = w / w.sum(dim=1, keepdim=True)
         return (x * w).sum(dim=2)
 
@@ -67,13 +89,16 @@ class CompleteModel(nn.Module):
         num_inducing_points=100,
         size=51,
         intercept=torch.tensor(15.0),
+        dimension_resolution=None,
     ):
         super().__init__()
 
         self.elevation_weight = nn.Parameter(torch.tensor([-0.01]))
         self.beta = nn.Parameter(torch.randn(num_dims * 2))
         self.intercept = nn.Parameter(intercept)
-        self.exp_weight = Exponential(size=size, num_dims=num_dims)
+        self.exp_weight = Exponential(
+            size=size, num_dims=num_dims, dimension_resolution=dimension_resolution
+        )
         self.gp_layer = GPModel(inducing_points=torch.randn(num_inducing_points, 2))
 
         self.size = size

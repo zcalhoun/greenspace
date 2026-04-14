@@ -272,6 +272,7 @@ def train(
         num_dims=train_ds.dataset.num_dims,
         intercept=train_ds.dataset.init_temp,
         num_inducing_points=num_inducing_points,
+        dimension_resolution=torch.tensor(train_ds.dataset.dimension_resolution),
     )
     likelihood = GaussianLikelihood()
 
