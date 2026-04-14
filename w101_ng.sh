@@ -25,4 +25,5 @@ python main.py \
     --pretrain-lr 0.1 \
     --lr 0.05 \
     --window-size 101 \
-    --epochs 10
+    --epochs 10 \
+    --cuda-debug

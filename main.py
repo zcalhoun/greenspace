@@ -3,6 +3,12 @@ import json
 import argparse
 import sys
 
+# Must be set before any CUDA-initializing imports.
+# Activated by --cuda-debug to make all CUDA ops synchronous so errors surface
+# at the correct call site rather than at the next CPU-GPU sync point.
+if "--cuda-debug" in sys.argv:
+    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+
 import numpy as np
 
 # from matplotlib import pyplot as plt
@@ -64,7 +70,7 @@ def main(args):
     # Initialize the training set up.
     ######
     if args.test:
-        l2_lambdas = [1e-2]
+        l2_lambdas = [1e-4]
     else:
         l2_lambdas = [1e-4, 1e-3, 1e-2, 1e-1, 1]
 
@@ -696,6 +702,16 @@ if __name__ == "__main__":
         type=int,
         default=3,
         help="Epochs with no improvement before ReduceLROnPlateau reduces pre-training LR.",
+    )
+    parser.add_argument(
+        "--cuda-debug",
+        action="store_true",
+        help=(
+            "Set CUDA_LAUNCH_BLOCKING=1 to make all CUDA ops synchronous. "
+            "Surfaces illegal memory access errors at the correct call site "
+            "instead of a later sync point. Significantly slows training — "
+            "use only for debugging."
+        ),
     )
     arguments = parser.parse_args()
     main(arguments)
