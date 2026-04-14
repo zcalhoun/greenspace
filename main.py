@@ -35,6 +35,7 @@ def main(args):
         cities = os.listdir(args.data_dir)
         city = cities[int(task_id)]
 
+    logger.info(f"Running code for {city}...")
     output_dir = os.path.join(args.output_dir, city)
     retry = False
     if not os.path.exists(output_dir):
@@ -226,6 +227,34 @@ def save_result(train_result, output_dir):
         f.write("\n")
 
 
+def _farthest_point_sample(coords, residuals, k):
+    """
+    Select k points from coords using farthest-point sampling seeded by the
+    highest residual. Each subsequent point maximises the minimum distance to
+    the already-selected set, so the result is both spatially spread and
+    biased toward high-error regions.
+
+    Args:
+        coords:    (N, 2) float tensor of standardized coordinates
+        residuals: (N,)   float tensor of absolute residuals
+        k:         number of points to select
+
+    Returns:
+        (k, 2) float tensor of selected coordinates
+    """
+    n = coords.size(0)
+    selected = [residuals.argmax().item()]
+    min_dists = torch.full((n,), float("inf"))
+
+    while len(selected) < k:
+        last = coords[selected[-1]]
+        dists = ((coords - last) ** 2).sum(dim=1)
+        min_dists = torch.minimum(min_dists, dists)
+        selected.append(min_dists.argmax().item())
+
+    return coords[torch.tensor(selected)]
+
+
 def train(
     train_ds, val_ds, l2_penalty, args, num_inducing_points=None, pretrain_epochs=None
 ):
@@ -314,6 +343,32 @@ def train(
         pretrain_scheduler.step(train_loss)
 
     ######
+    ## INDUCING POINT INITIALIZATION FROM PRE-TRAIN RESIDUALS
+    ######
+    model.eval()
+    all_coords = []
+    all_residuals = []
+    with torch.no_grad():
+        for c, e, s, y_batch in train_loader:
+            c, e, s, y_batch = (
+                c.to(device),
+                e.to(device),
+                s.to(device),
+                y_batch.to(device),
+            )
+            pred = model(c, e, s, pretrain=True)
+            all_coords.append(c.cpu())
+            all_residuals.append((y_batch - pred).abs().cpu())
+
+    all_coords = torch.cat(all_coords, dim=0)  # (N, 2)
+    all_residuals = torch.cat(all_residuals, dim=0)  # (N,)
+
+    k = min(num_inducing_points, len(all_coords))
+    inducing_points = _farthest_point_sample(all_coords, all_residuals, k).to(device)
+    model.gp_layer.variational_strategy.inducing_points.data.copy_(inducing_points)
+    logger.info(f"Initialized {k} inducing points via farthest-point sampling.")
+
+    ######
     ## MAIN TRAINING LOOP
     ######
     optimizer = torch.optim.Adam(
@@ -323,7 +378,8 @@ def train(
         ],
         lr=args.lr,
     )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    total_iters = args.epochs * len(train_loader)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_iters)
     mll = VariationalELBO(likelihood, model.gp_layer, num_data=len(train_ds))
     best_train_loss = float("inf")
     patience_counter = 0
@@ -355,12 +411,12 @@ def train(
                 )
             scaler.step(optimizer)
             scaler.update()
+            scheduler.step()
             epoch_train_loss += loss.item() * y_batch.size(0)
             epoch_train_count += y_batch.size(0)
 
         train_loss = epoch_train_loss / epoch_train_count
         training_result["train_loss"].append(train_loss)
-        scheduler.step()
 
         if train_loss < best_train_loss:
             if best_train_loss - train_loss < args.threshold:
