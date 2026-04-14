@@ -37,18 +37,24 @@ _NLCD_CLASSES = [
     90,
     95,
 ]
-_GREEN_CLASSES = [0, 2, 4, 6, 8, 10, 12, 13, 14]
+_GREEN_CLASSES = [2, 4, 6, 8, 10, 12, 13, 14]
 
 
 class GreenspaceDataset(Dataset):
     """ """
 
-    # Precomputed LUTs: raw raster value → class index
-    _NLCD_LUT = torch.zeros(max(_NLCD_CLASSES) + 1, dtype=torch.long)
+    # Precomputed LUTs: raw raster value → class index (0-based).
+    # Sized +2 so the last slot acts as a dump index (num_classes) for any
+    # value clamped above the valid range or not present in the class list.
+    _NLCD_LUT = torch.full(
+        (max(_NLCD_CLASSES) + 2,), len(_NLCD_CLASSES), dtype=torch.long
+    )
     for _idx, _val in enumerate(_NLCD_CLASSES):
         _NLCD_LUT[_val] = _idx
 
-    _GS_LUT = torch.zeros(max(_GREEN_CLASSES) + 1, dtype=torch.long)
+    _GS_LUT = torch.full(
+        (max(_GREEN_CLASSES) + 2,), len(_GREEN_CLASSES), dtype=torch.long
+    )
     for _idx, _val in enumerate(_GREEN_CLASSES):
         _GS_LUT[_val] = _idx
 
@@ -159,13 +165,17 @@ class GreenspaceDataset(Dataset):
         ndvi_albedo_window = torch.clamp(ndvi_albedo_window, 0.0, 1.0)
         temp = torch.tensor(self.temp[idx], dtype=torch.float32)
 
-        nlcd_oh = self._create_one_hot(nlcd_window, self._NLCD_LUT, len(_NLCD_CLASSES)).permute(
+        nlcd_oh = self._create_one_hot(
+            nlcd_window, self._NLCD_LUT, len(_NLCD_CLASSES)
+        ).permute(
             2, 0, 1
         )  # (C, H, W)
 
         if self.return_greenspace:
             greenspace_window = torch.from_numpy(self.greenspace[idx]).long()
-            gs_oh = self._create_one_hot(greenspace_window, self._GS_LUT, len(_GREEN_CLASSES)).permute(
+            gs_oh = self._create_one_hot(
+                greenspace_window, self._GS_LUT, len(_GREEN_CLASSES)
+            ).permute(
                 2, 0, 1
             )  # (C, H, W)
 
@@ -177,8 +187,14 @@ class GreenspaceDataset(Dataset):
         return coords, elev, stacked_window, temp
 
     def _create_one_hot(self, window, lut, num_classes):
-        indices = lut[window]
-        return F.one_hot(indices, num_classes=num_classes).float()
+        # Clamp to LUT bounds; anything out-of-range or not in the class list
+        # resolves to the dump index (num_classes) via the LUT initialisation.
+        indices = lut[window.clamp(0, lut.size(0) - 1)]
+        # One-hot has num_classes+1 channels; drop the last (dump) channel so
+        # invalid pixels become all-zeros in the output.
+        return F.one_hot(indices, num_classes=num_classes + 1).float()[
+            ..., :num_classes
+        ]
 
 
 def load_metadata(meta_path: str):
