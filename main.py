@@ -261,7 +261,7 @@ def _farthest_point_sample(coords, residuals, k):
     return coords[torch.tensor(selected)]
 
 
-def _lstsq_init(model, train_loader, device, l2_penalty):
+def _lstsq_init(model, train_loader, device, l2_penalty, init_l2_min=1e-2):
     """
     Initialize model.beta, model.elevation_weight, and model.intercept via
     ridge regression using the fixed initial exp_weight.
@@ -269,16 +269,18 @@ def _lstsq_init(model, train_loader, device, l2_penalty):
     Assembles the full feature matrix [e | point | linear_terms | 1] over the
     training set and solves the L2-regularized normal equations:
 
-        (X^T X + l2_penalty * I) w = X^T y
+        (X^T X + λ_init * I) w = X^T y
 
-    Using the same l2_penalty as training ensures the initialization is
-    consistent with the training objective and avoids unstable solutions caused
-    by collinearity between the one-hot channels (which sum to 1) and the
-    intercept, and between point features and their windowed averages.
+    λ_init = max(l2_penalty, init_l2_min) decouples initialization stability
+    from the training penalty: small training lambdas produce near-singular
+    systems whose solutions have large coefficients and a large initial loss,
+    even though the collinearity means those coefficients cancel in practice.
+    A stronger initialization lambda gives a stable, moderate-norm starting
+    point that pre-training can then refine.
 
-    The intercept column is excluded from regularization by zeroing the last
-    diagonal entry.
+    The intercept column is excluded from regularization.
     """
+    init_lambda = max(l2_penalty, init_l2_min)
     model.eval()
     all_X = []
     all_y = []
@@ -296,9 +298,9 @@ def _lstsq_init(model, train_loader, device, l2_penalty):
     X = torch.cat(all_X, dim=0)  # (N, 1 + num_dims*2 + 1)
     y = torch.cat(all_y, dim=0)  # (N,)
 
-    # Ridge normal equations: (X^T X + λI) w = X^T y
+    # Ridge normal equations: (X^T X + λ_init * I) w = X^T y
     # Don't regularize the intercept (last column)
-    reg = l2_penalty * torch.eye(X.shape[1])
+    reg = init_lambda * torch.eye(X.shape[1])
     reg[-1, -1] = 0.0
     A = X.T @ X + reg
     b = X.T @ y
@@ -433,15 +435,39 @@ def train(
             )
             pred = model(c, e, s, pretrain=True)
             all_coords.append(c.cpu())
-            all_residuals.append((y_batch - pred).abs().cpu())
+            all_residuals.append((y_batch - pred).cpu())
 
-    all_coords = torch.cat(all_coords, dim=0)  # (N, 2)
-    all_residuals = torch.cat(all_residuals, dim=0)  # (N,)
+    all_coords = torch.cat(all_coords, dim=0)       # (N, 2)
+    all_residuals = torch.cat(all_residuals, dim=0)  # (N,) signed
 
     k = min(num_inducing_points, len(all_coords))
-    inducing_points = _farthest_point_sample(all_coords, all_residuals, k).to(device)
+    inducing_points = _farthest_point_sample(all_coords, all_residuals.abs(), k).to(device)
     model.gp_layer.variational_strategy.inducing_points.data.copy_(inducing_points)
     logger.info(f"Initialized {k} inducing points via farthest-point sampling.")
+
+    # Variational mean: for each inducing point, average the signed residuals
+    # of its nearest training points — gives the GP a warm start on corrections
+    # the linear model consistently misses at each location.
+    dists = torch.cdist(inducing_points.cpu(), all_coords)  # (k, N)
+    nearest = dists.topk(k=min(10, len(all_coords)), dim=1, largest=False).indices
+    variational_mean = all_residuals[nearest].mean(dim=1).to(device)
+    model.gp_layer.variational_strategy._variational_distribution.variational_mean.data.copy_(
+        variational_mean
+    )
+
+    # Likelihood noise: pre-training MSE is a direct estimate of unexplained variance
+    pretrain_mse = (all_residuals ** 2).mean()
+    likelihood.noise_covar.noise = pretrain_mse.clamp(min=1e-4).to(device)
+
+    # Kernel outputscale: residual variance sets the GP's amplitude
+    residual_var = all_residuals.var()
+    for kernel in model.gp_layer.covar_module.kernels:
+        kernel.outputscale = residual_var.clamp(min=1e-4).to(device)
+
+    logger.info(
+        f"GP init — noise: {pretrain_mse.item():.4f}, "
+        f"outputscale: {residual_var.item():.4f}"
+    )
 
     ######
     ## MAIN TRAINING LOOP
