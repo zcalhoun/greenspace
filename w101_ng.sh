@@ -13,17 +13,13 @@
 source ~/.bashrc
 conda activate svgp
 
-which python
-python --version
-ldd $(which python) | grep libstdc++
-
 python main.py \
     --data-dir /hpc/group/carlsonlab/zdc6/greenspace/data/traversals/ \
     --output-dir /work/zdc6/greenspace/results/w101/pm/ng/ \
     --patience 3 \
     --batch-size 128 \
     --pretrain-lr 0.1 \
-    --lr 0.05 \
+    --lr 0.1 \
     --window-size 101 \
     --epochs 10 \
-    --cuda-debug
+    --pretrain-epochs 2
