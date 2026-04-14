@@ -194,7 +194,7 @@ def cross_validation(gs, train_idx, l2_penalty, args, folds=5):
             l2_penalty,
             args,
             num_inducing_points=args.num_inducing_points,
-            pretrain_epochs=1, args.pretrain_epochs,
+            pretrain_epochs=args.pretrain_epochs,
         )
         training_errs.append(cv_result["train_mse"])
         validation_errs.append(cv_result["val_mse"])
