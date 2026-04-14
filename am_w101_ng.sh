@@ -20,6 +20,7 @@ python main.py \
     --patience 3 \
     --batch-size 128 \
     --pretrain-lr 0.1 \
-    --lr 0.05 \
+    --lr 0.1 \
     --window-size 101 \
-    --epochs 10
+    --epochs 10 \
+    --pretrain-epochs 2
