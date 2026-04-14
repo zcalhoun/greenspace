@@ -261,14 +261,23 @@ def _farthest_point_sample(coords, residuals, k):
     return coords[torch.tensor(selected)]
 
 
-def _lstsq_init(model, train_loader, device):
+def _lstsq_init(model, train_loader, device, l2_penalty):
     """
     Initialize model.beta, model.elevation_weight, and model.intercept via
-    least squares using the fixed initial exp_weight.
+    ridge regression using the fixed initial exp_weight.
 
     Assembles the full feature matrix [e | point | linear_terms | 1] over the
-    training set and solves X @ [elevation_weight; beta; intercept] ≈ y in one
-    shot, giving a stable starting point that respects the initial lengthscale.
+    training set and solves the L2-regularized normal equations:
+
+        (X^T X + l2_penalty * I) w = X^T y
+
+    Using the same l2_penalty as training ensures the initialization is
+    consistent with the training objective and avoids unstable solutions caused
+    by collinearity between the one-hot channels (which sum to 1) and the
+    intercept, and between point features and their windowed averages.
+
+    The intercept column is excluded from regularization by zeroing the last
+    diagonal entry.
     """
     model.eval()
     all_X = []
@@ -287,13 +296,19 @@ def _lstsq_init(model, train_loader, device):
     X = torch.cat(all_X, dim=0)   # (N, 1 + num_dims*2 + 1)
     y = torch.cat(all_y, dim=0)   # (N,)
 
-    solution = torch.linalg.lstsq(X, y.unsqueeze(1)).solution.squeeze(1)
+    # Ridge normal equations: (X^T X + λI) w = X^T y
+    # Don't regularize the intercept (last column)
+    reg = l2_penalty * torch.eye(X.shape[1])
+    reg[-1, -1] = 0.0
+    A = X.T @ X + reg
+    b = X.T @ y
+    solution = torch.linalg.solve(A, b)
 
-    # Unpack solution: elevation_weight (1) | beta (num_dims*2) | intercept (1)
+    # Unpack: elevation_weight (1) | beta (num_dims*2) | intercept (1)
     num_beta = model.beta.shape[0]
     model.elevation_weight.data.copy_(solution[:1])
     model.beta.data.copy_(solution[1 : 1 + num_beta])
-    model.intercept.data.copy_(solution[1 + num_beta :])
+    model.intercept.data.copy_(solution[-1])
 
 
 def train(
@@ -346,8 +361,8 @@ def train(
     ######
     ## LEAST SQUARES INITIALIZATION
     ######
-    _lstsq_init(model, train_loader, device)
-    logger.info("Initialized beta, elevation_weight, intercept via least squares.")
+    _lstsq_init(model, train_loader, device, l2_penalty)
+    logger.info("Initialized beta, elevation_weight, intercept via ridge regression.")
 
     ######
     ## PRE-TRAINING
