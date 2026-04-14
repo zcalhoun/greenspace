@@ -19,7 +19,7 @@ python main.py \
     --patience 3 \
     --greenspace \
     --batch-size 128 \
-    --pretrain-lr 0.1 \
-    --lr 0.05 \
+    --pretrain-lr 0.01 \
+    --lr 0.01 \
     --window-size 101 \
     --epochs 10

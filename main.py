@@ -261,6 +261,41 @@ def _farthest_point_sample(coords, residuals, k):
     return coords[torch.tensor(selected)]
 
 
+def _lstsq_init(model, train_loader, device):
+    """
+    Initialize model.beta, model.elevation_weight, and model.intercept via
+    least squares using the fixed initial exp_weight.
+
+    Assembles the full feature matrix [e | point | linear_terms | 1] over the
+    training set and solves X @ [elevation_weight; beta; intercept] ≈ y in one
+    shot, giving a stable starting point that respects the initial lengthscale.
+    """
+    model.eval()
+    all_X = []
+    all_y = []
+
+    with torch.no_grad():
+        for c, e, s, y_batch in train_loader:
+            e, s, y_batch = e.to(device), s.to(device), y_batch.to(device)
+            point = s[:, :, model.size // 2, model.size // 2]
+            linear_terms = model.exp_weight(s.flatten(start_dim=2))
+            ones = torch.ones(y_batch.size(0), 1, device=device)
+            X = torch.cat([e, point, linear_terms, ones], dim=1)
+            all_X.append(X.cpu().float())
+            all_y.append(y_batch.cpu().float())
+
+    X = torch.cat(all_X, dim=0)   # (N, 1 + num_dims*2 + 1)
+    y = torch.cat(all_y, dim=0)   # (N,)
+
+    solution = torch.linalg.lstsq(X, y.unsqueeze(1)).solution.squeeze(1)
+
+    # Unpack solution: elevation_weight (1) | beta (num_dims*2) | intercept (1)
+    num_beta = model.beta.shape[0]
+    model.elevation_weight.data.copy_(solution[:1])
+    model.beta.data.copy_(solution[1 : 1 + num_beta])
+    model.intercept.data.copy_(solution[1 + num_beta :])
+
+
 def train(
     train_ds, val_ds, l2_penalty, args, num_inducing_points=None, pretrain_epochs=None
 ):
@@ -307,6 +342,12 @@ def train(
         "lengthscales": None,
         "coefficients": None,
     }
+
+    ######
+    ## LEAST SQUARES INITIALIZATION
+    ######
+    _lstsq_init(model, train_loader, device)
+    logger.info("Initialized beta, elevation_weight, intercept via least squares.")
 
     ######
     ## PRE-TRAINING
