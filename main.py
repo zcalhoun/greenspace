@@ -333,8 +333,20 @@ def train(
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             scaler.step(optimizer)
             scaler.update()
+            if torch.isnan(loss):
+                logger.warn(f"NaN loss detected")
+                logger.warn(f"  beta norm: {model.beta.norm().item()}")
+                logger.warn(
+                    f"  output range: {output.min().item():.3f} to {output.max().item():.3f}"
+                )
+                logger.warn(
+                    f"  y_batch range: {y_batch.min().item():.3f} to {y_batch.max().item():.3f}"
+                )
+                logger.warn(f"  lengthscales: {model.exp_weight.lengthscale.data}")
+                raise ValueError("NaN in pretrain loss — see above for diagnostics")
             epoch_train_loss += loss.item() * y_batch.size(0)
             epoch_train_count += y_batch.size(0)
+
         logger.info(
             f"Pretrain Epoch {i+1}/{pretrain_epochs}, Loss: {epoch_train_loss/epoch_train_count}"
         )
