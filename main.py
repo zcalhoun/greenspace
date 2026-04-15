@@ -213,7 +213,7 @@ def bopt_get_next_parameter(l2_lambdas, results):
     y = np.array(results)
 
     k = 0.5 * kernels.RBF()
-    gp = GaussianProcessRegressor(k)
+    gp = GaussianProcessRegressor(k, normalize_y=True)
     gp.fit(X, y)
 
     test_points = np.logspace(-4, 0, 1000)
@@ -437,11 +437,13 @@ def train(
             all_coords.append(c.cpu())
             all_residuals.append((y_batch - pred).cpu())
 
-    all_coords = torch.cat(all_coords, dim=0)       # (N, 2)
+    all_coords = torch.cat(all_coords, dim=0)  # (N, 2)
     all_residuals = torch.cat(all_residuals, dim=0)  # (N,) signed
 
     k = min(num_inducing_points, len(all_coords))
-    inducing_points = _farthest_point_sample(all_coords, all_residuals.abs(), k).to(device)
+    inducing_points = _farthest_point_sample(all_coords, all_residuals.abs(), k).to(
+        device
+    )
     model.gp_layer.variational_strategy.inducing_points.data.copy_(inducing_points)
     logger.info(f"Initialized {k} inducing points via farthest-point sampling.")
 
@@ -456,7 +458,7 @@ def train(
     )
 
     # Likelihood noise: pre-training MSE is a direct estimate of unexplained variance
-    pretrain_mse = (all_residuals ** 2).mean()
+    pretrain_mse = (all_residuals**2).mean()
     likelihood.noise_covar.noise = pretrain_mse.clamp(min=1e-4).to(device)
 
     # Kernel outputscale: residual variance sets the GP's amplitude
