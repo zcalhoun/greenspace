@@ -16,7 +16,7 @@ conda activate svgp
 python main.py \
     --data-dir /hpc/group/carlsonlab/zdc6/greenspace/data/traversals/ \
     --output-dir /work/zdc6/greenspace/results/w101_e20/pm/gs/ \
-    --patience 3 \
+    --patience 100 \
     --greenspace \
     --batch-size 128 \
     --pretrain-lr 0.1 \
