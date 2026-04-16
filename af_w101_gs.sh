@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #SBATCH --job-name=af_gs_w101
-#SBATCH --array=0-21
+#SBATCH --array=17
 #SBATCH --mail-user=zachary.calhoun@duke.edu
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH -p scavenger-gpu
@@ -24,4 +24,5 @@ python main.py \
     --lr 0.1 \
     --window-size 101 \
     --epochs 10 \
-    --pretrain-epochs 2
+    --pretrain-epochs 2 \
+    --cuda-debug
