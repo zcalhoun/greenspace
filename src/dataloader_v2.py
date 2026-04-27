@@ -84,7 +84,14 @@ class GreenspaceDataset(Dataset):
     for _idx, _val in enumerate(_GREEN_CLASSES):
         _GS_LUT[_val] = _idx
 
-    def __init__(self, data_dir=None, greenspace=False, time="pm", window_size=51):
+    def __init__(
+        self,
+        data_dir=None,
+        greenspace=False,
+        time="pm",
+        window_size=51,
+        ndvi_albedo=True,
+    ):
         """
         Data_dir is the directory of the source data.
         greenspace indicates whether greenspace should ultimately be returned.
@@ -94,6 +101,7 @@ class GreenspaceDataset(Dataset):
         self.greenspace = greenspace
         self.window_size = window_size
         self.return_greenspace = greenspace
+        self.return_ndvi_albedo = ndvi_albedo
 
         # First, we are going to load the coordinates
         temp_file = os.path.join(data_dir, time, "trav.shp")
@@ -144,8 +152,9 @@ class GreenspaceDataset(Dataset):
         if self.return_greenspace:
             gs_res = _pixel_size_metres(self.greenspace)
             resolutions += [gs_res] * len(_GREEN_CLASSES)
-        ndvi_res = _pixel_size_metres(self.ndvi_albedo)
-        resolutions += [ndvi_res] * 2  # NDVI, albedo
+        if self.return_ndvi_albedo:
+            ndvi_res = _pixel_size_metres(self.ndvi_albedo)
+            resolutions += [ndvi_res] * 2  # NDVI, albedo
         return np.array(resolutions, dtype=np.float32)
 
     def _extract_coords(self, gdf):
@@ -224,7 +233,10 @@ class GreenspaceDataset(Dataset):
             )  # (C, H, W)
 
             # Add the NDVI and albedo channels to the stacked window
-            stacked_window = torch.cat([nlcd_oh, gs_oh, ndvi_albedo_window], dim=0)
+            if self.return_ndvi_albedo:
+                stacked_window = torch.cat([nlcd_oh, gs_oh, ndvi_albedo_window], dim=0)
+            else:
+                stacked_window = torch.cat([nlcd_oh, gs_oh], dim=0)
         else:
             stacked_window = torch.cat([nlcd_oh, ndvi_albedo_window], dim=0)
 

@@ -1,10 +1,9 @@
 """
-Bayesian optimization to learn AnisotropicADEGreen parameters (v, D_L, r, theta,
-D_z, h_conv, offset) that maximize R² when predicting temperature from
-FFT-convolved LCZ features via Ridge regression.
+Baseline experiment: isotropic exponential convolution kernel.
 
-Runs over all cities and traversal periods (am, af, pm) found under
-data/traversals/. Results are saved to results/lcz_ade/{city}_{period}.json.
+Optimises a single length scale L via Bayesian optimisation, then fits
+the same Ridge regression as fft_main.py.  Results saved alongside the
+ADE results for direct comparison.
 """
 
 import os
@@ -16,7 +15,6 @@ import numpy as np
 import geopandas as gpd
 import rasterio
 from rasterio.transform import AffineTransformer
-from pyproj import Transformer, Geod
 from sklearn.linear_model import Ridge
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import Matern
@@ -24,30 +22,21 @@ from scipy.stats import norm
 
 import torch
 import torch.nn.functional as F
-from torch import nn
 
 
 sys.path.append("./src")
-from ade_3D import AnisotropicADEGreen
+from iso_exp import IsotropicExponential
 
 
 PERIODS = ["am", "af", "pm"]
 TRAVERSAL_ROOT = "./data/traversals"
 LCZ_ROOT = "./data/lcz"
-OUT_DIR = "./results/lcz_ade"
+OUT_DIR = "./results/lcz_iso"
 
-# BO bounds: v, D_L, r, theta, D_z, h_conv, offset
-BOUNDS = np.array(
-    [
-        [0.01, 5.0],
-        [1.0, 1000.0],
-        [0.1, 1.0],
-        [0.0, 2 * np.pi],
-        [1.0, 10.0],
-        [1.0, 100.0],
-        [0, 0],       # offset fixed at 0 for now
-    ]
-)
+# BO searches log(L) so the surrogate sees a well-scaled 1-D space.
+# L range: 100 m – 50 km  →  log bounds below.
+LOG_L_BOUNDS = np.array([[np.log(100.0), np.log(50_000.0)]])
+OFFSET = 0.0
 
 N_INIT = 10
 N_ITER = 100
@@ -88,55 +77,49 @@ def run_city_period(city, period, trav_shp, lcz_tif, out_path):
     print(f"  Grid: {nx}x{ny}  |  Points: {len(temp)}")
 
     gp = GaussianProcessRegressor(
-        kernel=Matern(nu=2.5, length_scale=np.ones(7), length_scale_bounds=(1e-3, 1e4)),
+        kernel=Matern(nu=2.5, length_scale=1.0, length_scale_bounds=(1e-3, 1e4)),
         normalize_y=True,
         n_restarts_optimizer=5,
         alpha=0.001,
     )
 
     print(f"  Evaluating {N_INIT} random initial points...")
-    X_obs = np.random.uniform(BOUNDS[:, 0], BOUNDS[:, 1], size=(N_INIT, 7))
-    y_obs = np.array([objective(x, one_hot, coords, temp, nx, ny) for x in X_obs])
+    log_L_obs = np.random.uniform(
+        LOG_L_BOUNDS[0, 0], LOG_L_BOUNDS[0, 1], size=(N_INIT, 1)
+    )
+    y_obs = np.array([objective(np.exp(x[0]), one_hot, coords, temp, nx, ny) for x in log_L_obs])
     print(f"  Initial R² range: [{y_obs.min():.4f}, {y_obs.max():.4f}]")
 
     print(f"  Running {N_ITER} BO iterations...")
     for i in range(N_ITER):
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message=".*length_scale.*", category=UserWarning)
-            gp.fit(X_obs, y_obs)
+            warnings.filterwarnings("ignore", category=UserWarning)
+            gp.fit(log_L_obs, y_obs)
 
-        X_cand = np.random.uniform(BOUNDS[:, 0], BOUNDS[:, 1], size=(1000, 7))
-        ei = expected_improvement(X_cand, gp, f_best=y_obs.max())
-        x_next = X_cand[ei.argmax()]
+        cands = np.random.uniform(
+            LOG_L_BOUNDS[0, 0], LOG_L_BOUNDS[0, 1], size=(1000, 1)
+        )
+        ei = expected_improvement(cands, gp, f_best=y_obs.max())
+        log_L_next = cands[ei.argmax()]
 
-        y_next = objective(x_next, one_hot, coords, temp, nx, ny)
-        X_obs = np.append(X_obs, [x_next], axis=0)
+        y_next = objective(np.exp(log_L_next[0]), one_hot, coords, temp, nx, ny)
+        log_L_obs = np.append(log_L_obs, [log_L_next], axis=0)
         y_obs = np.append(y_obs, y_next)
 
         if (i + 1) % 10 == 0:
             print(f"  Iter {i+1:3d} | best R²={y_obs.max():.4f}")
 
     best_idx = y_obs.argmax()
-    best_params = X_obs[best_idx]
     best_r2 = float(y_obs[best_idx])
-
-    v, D_L, r, theta, D_z, h_conv, offset = best_params
-    coefs = fit_final_model(best_params, one_hot, coords, temp, nx, ny)
+    L = float(np.exp(log_L_obs[best_idx, 0]))
+    coefs = fit_final_model(L, one_hot, coords, temp, nx, ny)
 
     result = {
         "city": city,
         "period": period,
         "r2": best_r2,
-        "params": {
-            "v": float(v),
-            "D_L": float(D_L),
-            "D_T": float(D_L * r),
-            "r": float(r),
-            "theta": float(theta),
-            "D_z": float(D_z),
-            "h_conv": float(h_conv),
-            "offset": float(offset),
-        },
+        "params": {"L": L, "offset": OFFSET},
         "coefficients": coefs.tolist(),
     }
 
@@ -146,39 +129,24 @@ def run_city_period(city, period, trav_shp, lcz_tif, out_path):
     print(f"  Done. R²={best_r2:.4f}  →  {out_path}")
 
 
-def fit_final_model(params, S, coords, obs, nx, ny):
-    """Re-fit the Ridge model at the best params and return coefficients."""
-    v, D_L, r, theta, D_z, h_conv, offset = params
-    D_T = D_L * r
-    model = AnisotropicADEGreen(
-        nx, ny, dx=100.0, dy=100.0,
-        v=v, D_L=D_L, D_T=D_T, theta=theta,
-        h=2, D_z=D_z, padding=10, h_conv=h_conv,
-    )
+def fit_final_model(L, S, coords, obs, nx, ny):
+    model = IsotropicExponential(nx, ny, dx=100.0, dy=100.0, L=L, padding=10)
     with torch.no_grad():
         res = model(S)
-
     X = res[:, coords[:, 0], coords[:, 1]].T
     lm = Ridge(0.01, positive=True, fit_intercept=False)
-    lm.fit(X, obs - obs.min() - offset)
+    lm.fit(X, obs - obs.min() - OFFSET)
     return lm.coef_
 
 
-def objective(params, S, coords, obs, nx, ny):
-    v, D_L, r, theta, D_z, h_conv, offset = params
-    D_T = D_L * r
-    model = AnisotropicADEGreen(
-        nx, ny, dx=100.0, dy=100.0,
-        v=v, D_L=D_L, D_T=D_T, theta=theta,
-        h=2, D_z=D_z, padding=10, h_conv=h_conv,
-    )
+def objective(L, S, coords, obs, nx, ny):
+    model = IsotropicExponential(nx, ny, dx=100.0, dy=100.0, L=L, padding=10)
     with torch.no_grad():
         res = model(S)
-
     X = res[:, coords[:, 0], coords[:, 1]].T
     lm = Ridge(0.01, positive=True, fit_intercept=False)
-    lm.fit(X, obs - obs.min() - offset)
-    return lm.score(X, obs - obs.min() - offset)
+    lm.fit(X, obs - obs.min() - OFFSET)
+    return lm.score(X, obs - obs.min() - OFFSET)
 
 
 def expected_improvement(X, gp, f_best, xi=0.01):
@@ -212,7 +180,6 @@ def load_data(trav_shp, lcz_tif):
     temp_col = next(c for c in ("temp_f", "t_f", "T") if c in gdf.columns)
     temp = gdf[temp_col].values
 
-    # Drop points that fall outside the raster grid
     valid = (
         (coords[:, 0] >= 0) & (coords[:, 0] < nx) &
         (coords[:, 1] >= 0) & (coords[:, 1] < ny)
