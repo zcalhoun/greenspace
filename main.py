@@ -23,7 +23,7 @@ from gpytorch.mlls import VariationalELBO
 sys.path.append("./src")
 from dataloader_v2 import GreenspaceDataset
 from model import CompleteModel
-from utils import SimpleLogger
+from utils import SimpleLogger, lstsq_init
 
 import pandas as pd
 
@@ -363,7 +363,7 @@ def train(
     ######
     ## LEAST SQUARES INITIALIZATION
     ######
-    _lstsq_init(model, train_loader, device, l2_penalty)
+    lstsq_init(model, train_loader, device, l2_penalty)
     logger.info("Initialized beta, elevation_weight, intercept via ridge regression.")
 
     ######
