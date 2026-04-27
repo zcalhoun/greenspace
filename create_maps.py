@@ -11,7 +11,6 @@ import argparse
 import sys
 
 import numpy as np
-import pandas as pd
 
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
@@ -23,6 +22,8 @@ from dataloader_v2 import GreenspaceDataset
 from model import CompleteModel
 from utils import SimpleLogger, lstsq_init, farthest_point_sample
 
+# PANDAS NEEDS TO COME LAST...it's a weird dependency problem.
+import pandas as pd
 
 logger = SimpleLogger()
 
