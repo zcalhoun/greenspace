@@ -5,7 +5,7 @@
 #SBATCH --mail-user=zachary.calhoun@duke.edu
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH -p scavenger-gpu
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:2080:1
 #SBATCH --mem=8G
 #SBATCH --output=./pm_fit/%a.txt
 #SBATCH --error=./pm_fit/%a.err
