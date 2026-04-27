@@ -102,7 +102,10 @@ def lstsq_init(model, train_loader, device, l2_penalty, init_l2_min=1e-2):
 
     # Unpack: elevation_weight (1) | beta (num_dims*2) | intercept (1)
     num_beta = model.beta.shape[0]
-    model.elevation_weight.data.copy_(solution[:1])
+    # elevation_weight = -softplus(raw), so raw = softplus_inverse(-elev)
+    # Clamp solution to be strictly negative before inverting.
+    elev_solution = solution[:1].clamp(max=-1e-3)
+    model.raw_elevation_weight.data.copy_(torch.log(torch.expm1(-elev_solution)))
     model.beta.data.copy_(solution[1 : 1 + num_beta])
     model.intercept.data.copy_(solution[-1])
 

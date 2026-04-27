@@ -96,7 +96,11 @@ class CompleteModel(nn.Module):
     ):
         super().__init__()
 
-        self.elevation_weight = nn.Parameter(torch.tensor([-0.01]))
+        # Elevation always cools with altitude; -softplus keeps the weight ≤ 0.
+        # Initialize so that softplus(raw) ≈ 0.01 → raw = log(expm1(0.01)) ≈ -4.6
+        self.raw_elevation_weight = nn.Parameter(
+            torch.log(torch.expm1(torch.tensor([0.01])))
+        )
         self.raw_beta = nn.Parameter(torch.zeros(num_dims * 2))
         self.intercept = nn.Parameter(intercept)
         self.register_buffer("min_temp", intercept.detach().clone())
@@ -107,6 +111,10 @@ class CompleteModel(nn.Module):
 
         self.size = size
         self.non_negative = non_negative
+
+    @property
+    def elevation_weight(self):
+        return -F.softplus(self.raw_elevation_weight)
 
     @property
     def beta(self):

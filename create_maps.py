@@ -173,7 +173,7 @@ def fit_model(dataset, args):
             epoch_train_count += y_batch.size(0)
 
         logger.info(
-            f"Pretrain Epoch {i+1}/{pretrain_epochs}, Loss: {epoch_train_loss/epoch_train_count}, Intercept: {model.intercept.item()}"
+            f"Pretrain Epoch {i+1}/{pretrain_epochs}, Loss: {epoch_train_loss/epoch_train_count}, Intercept: {model.elevation_weight.item()}"
         )
         train_loss = epoch_train_loss / epoch_train_count
         training_result["train_loss"].append(train_loss)
