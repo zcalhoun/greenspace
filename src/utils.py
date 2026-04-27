@@ -72,15 +72,22 @@ def lstsq_init(model, train_loader, device, l2_penalty, init_l2_min=1e-2):
     all_X = []
     all_y = []
 
-    with torch.no_grad():
-        for c, e, s, y_batch in train_loader:
-            e, s, y_batch = e.to(device), s.to(device), y_batch.to(device)
-            point = s[:, :, model.size // 2, model.size // 2]
-            linear_terms = model.exp_weight(s.flatten(start_dim=2))
-            ones = torch.ones(y_batch.size(0), 1, device=device)
-            X = torch.cat([e, point, linear_terms, ones], dim=1)
-            all_X.append(X.cpu().float())
-            all_y.append(y_batch.cpu().float())
+    # Run feature extraction on CPU: all results are moved to CPU anyway, and
+    # keeping data off the GPU avoids device-side errors on large cities.
+    model.exp_weight.cpu()
+    try:
+        with torch.no_grad():
+            for c, e, s, y_batch in train_loader:
+                e = e.float()
+                s = s.float()
+                point = s[:, :, model.size // 2, model.size // 2]
+                linear_terms = model.exp_weight(s.flatten(start_dim=2))
+                ones = torch.ones(y_batch.size(0), 1)
+                X = torch.cat([e, point, linear_terms, ones], dim=1)
+                all_X.append(X)
+                all_y.append(y_batch.float())
+    finally:
+        model.exp_weight.to(device)
 
     X = torch.cat(all_X, dim=0)  # (N, 1 + num_dims*2 + 1)
     y = torch.cat(all_y, dim=0)  # (N,)

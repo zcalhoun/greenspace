@@ -308,7 +308,7 @@ def fit_model(dataset, args):
             train_count += y_batch.size(0)
             all_preds.extend(pred.mean.cpu().numpy())
             all_targets.extend(y_batch.cpu().numpy())
-            all_coords.extend(c.cpu())
+            all_coords.extend(c.cpu().numpy())
 
         # Calc r2 score
         all_preds = np.array(all_preds)
