@@ -53,6 +53,7 @@ def main(args):
             time=args.time,
             window_size=args.window_size,
             ndvi_albedo=False,
+            non_negative=args.non_negative,
         )
 
     except ValueError as e:
@@ -89,7 +90,9 @@ def fit_model(dataset, args):
         intercept=dataset.init_temp,
         num_inducing_points=num_inducing_points,
         dimension_resolution=torch.tensor(dataset.dimension_resolution),
+        non_negative=args.non_negative,
     )
+    logger.info(f"Min temp: {dataset.init_temp}")
     likelihood = GaussianLikelihood()
 
     use_cuda = torch.cuda.is_available()
@@ -117,8 +120,9 @@ def fit_model(dataset, args):
         "coefficients": None,
     }
 
-    lstsq_init(model, train_loader, device, l2_penalty)
-    logger.info("Least squares initialization complete")
+    if not args.non_negative:
+        lstsq_init(model, train_loader, device, l2_penalty)
+        logger.info("Least squares initialization complete")
 
     mse_loss_fn = torch.nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.pretrain_lr)
@@ -144,6 +148,10 @@ def fit_model(dataset, args):
                 output = model(c, e, s, pretrain=True)
                 loss = mse_loss_fn(output, y_batch)
                 loss += l2_penalty * model.beta.norm()
+                loss += (
+                    args.intercept_penalty
+                    * (model.min_temp - model.intercept).clamp(min=0) ** 2
+                )
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             if args.grad_clip > 0:
@@ -165,7 +173,7 @@ def fit_model(dataset, args):
             epoch_train_count += y_batch.size(0)
 
         logger.info(
-            f"Pretrain Epoch {i+1}/{pretrain_epochs}, Loss: {epoch_train_loss/epoch_train_count}"
+            f"Pretrain Epoch {i+1}/{pretrain_epochs}, Loss: {epoch_train_loss/epoch_train_count}, Intercept: {model.intercept.item()}"
         )
         train_loss = epoch_train_loss / epoch_train_count
         training_result["train_loss"].append(train_loss)
@@ -257,6 +265,10 @@ def fit_model(dataset, args):
                 output = model(c, e, s)
                 loss = -mll(output, y_batch)
                 loss += l2_penalty * model.beta.norm()
+                loss += (
+                    args.intercept_penalty
+                    * (model.min_temp - model.intercept).clamp(min=0) ** 2
+                )
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             if args.grad_clip > 0:
@@ -280,7 +292,9 @@ def fit_model(dataset, args):
         else:
             patience_counter += 1
 
-        logger.info(f"Epoch {i+1}/{args.epochs}, Train Loss: {train_loss:.4f}")
+        logger.info(
+            f"Epoch {i+1}/{args.epochs}, Train Loss: {train_loss:.4f}, Intercept: {model.intercept.item()}"
+        )
         if patience_counter >= args.patience:
             logger.info("Early stopping triggered.")
             break
@@ -446,6 +460,17 @@ if __name__ == "__main__":
         type=float,
         default=0.01,
         help="A default L2 penalty for training the model.",
+    )
+    parser.add_argument(
+        "--intercept-penalty",
+        type=float,
+        default=1.0,
+        help="Penalty weight applied when the intercept drops below the initial min temperature.",
+    )
+    parser.add_argument(
+        "--non-negative",
+        action="store_true",
+        help="Convert the linear regression problem into a non-negative least squares problem.",
     )
     arguments = parser.parse_args()
     main(arguments)

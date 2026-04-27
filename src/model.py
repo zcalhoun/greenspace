@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 import gpytorch
@@ -66,9 +67,10 @@ class GPModel(ApproximateGP):
         )
         super(GPModel, self).__init__(variational_strategy)
         self.mean_module = gpytorch.means.ZeroMean()
-        self.covar_module = gpytorch.kernels.ScaleKernel(
-            gpytorch.kernels.MaternKernel(nu=0.5)
-        ) + gpytorch.kernels.ScaleKernel(gpytorch.kernels.LinearKernel())
+        self.covar_module = (
+            gpytorch.kernels.ScaleKernel(gpytorch.kernels.MaternKernel(nu=0.5))
+            + gpytorch.kernels.LinearKernel()
+        )
 
     def forward(self, x):
 
@@ -90,18 +92,28 @@ class CompleteModel(nn.Module):
         size=51,
         intercept=torch.tensor(15.0),
         dimension_resolution=None,
+        non_negative=False,
     ):
         super().__init__()
 
         self.elevation_weight = nn.Parameter(torch.tensor([-0.01]))
-        self.beta = nn.Parameter(torch.randn(num_dims * 2))
+        self.raw_beta = nn.Parameter(torch.zeros(num_dims * 2))
         self.intercept = nn.Parameter(intercept)
+        self.register_buffer("min_temp", intercept.detach().clone())
         self.exp_weight = Exponential(
             size=size, num_dims=num_dims, dimension_resolution=dimension_resolution
         )
         self.gp_layer = GPModel(inducing_points=torch.randn(num_inducing_points, 2))
 
         self.size = size
+        self.non_negative = non_negative
+
+    @property
+    def beta(self):
+        if self.non_negative:
+            return F.softplus(self.raw_beta)
+        else:
+            return self.raw_beta
 
     def forward(self, c, e, s, pretrain=False):
         # c is [batch_size, 2]

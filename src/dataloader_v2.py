@@ -91,6 +91,7 @@ class GreenspaceDataset(Dataset):
         time="pm",
         window_size=51,
         ndvi_albedo=True,
+        non_negative=False,
     ):
         """
         Data_dir is the directory of the source data.
@@ -102,6 +103,7 @@ class GreenspaceDataset(Dataset):
         self.window_size = window_size
         self.return_greenspace = greenspace
         self.return_ndvi_albedo = ndvi_albedo
+        self.non_negative = non_negative
 
         # First, we are going to load the coordinates
         temp_file = os.path.join(data_dir, time, "trav.shp")
@@ -131,7 +133,10 @@ class GreenspaceDataset(Dataset):
 
         _, _, s, t = self.__getitem__(0)
 
-        self.init_temp = t
+        if self.non_negative:
+            self.init_temp = torch.tensor(float(self.temp.min()), dtype=torch.float32)
+        else:
+            self.init_temp = t
         self.window_size = s.size(1)
         self.num_dims = s.size(0)
 
@@ -232,6 +237,8 @@ class GreenspaceDataset(Dataset):
                 2, 0, 1
             )  # (C, H, W)
 
+            if self.non_negative:
+                gs_oh = -gs_oh
             # Add the NDVI and albedo channels to the stacked window
             if self.return_ndvi_albedo:
                 stacked_window = torch.cat([nlcd_oh, gs_oh, ndvi_albedo_window], dim=0)
