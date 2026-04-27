@@ -10,6 +10,7 @@ import json
 import argparse
 import sys
 
+import rasterio
 import numpy as np
 
 import torch
