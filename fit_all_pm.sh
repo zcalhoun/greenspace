@@ -15,11 +15,12 @@ conda activate svgp
 
 python create_maps.py \
     --data-dir /hpc/group/carlsonlab/zdc6/greenspace/data/traversals/ \
-    --output-dir /work/zdc6/greenspace/results/ridge/pm/ \
+    --output-dir /work/zdc6/greenspace/results/ridge/pm_ip100/ \
     --patience 5 \
     --batch-size 128 \
     --pretrain-lr 0.1 \
     --lr 0.1 \
     --window-size 101 \
-    --epochs 10 \
-    --pretrain-epochs 2
+    --epochs 20 \
+    --pretrain-epochs 2 \
+    --num-inducing-points 100
