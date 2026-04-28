@@ -53,7 +53,6 @@ def main(args):
         window_size=51,  # THIS DOESN'T MATTER.
         ndvi_albedo=False,
         non_negative=True,
-        return_elev_tif=True,
     )
 
     # Load the model parameters
