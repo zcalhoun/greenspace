@@ -13,6 +13,6 @@
 source ~/.bashrc
 conda activate svgp
 
-python create_maps.py \
+python save_maps.py \
     --data-dir /hpc/group/carlsonlab/zdc6/greenspace/data/traversals/ \
     --output-dir /work/zdc6/greenspace/results/ridge/pm_ip100_nn/
