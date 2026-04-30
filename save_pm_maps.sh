@@ -6,7 +6,7 @@
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH -p carlsonlab-gpu
 #SBATCH --gres=gpu:1
-#SBATCH --mem=64G
+#SBATCH --mem=128G
 #SBATCH --output=./nn_save_pm/%a.txt
 #SBATCH --error=./nn_save_pm/%a.err
 

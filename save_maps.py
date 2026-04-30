@@ -198,7 +198,7 @@ def main(args):
     os.makedirs(output_dir, exist_ok=True)
     tif_profile = {
         "driver": "GTiff",
-        "dtype": "float32",
+        "dtype": "float16",
         "width": W,
         "height": H,
         "count": 1,
@@ -234,7 +234,7 @@ def main(args):
             class_cooling += beta[num_dims + c] * conv_ch
             gs_out = os.path.join(output_dir, f"gs_cooling_{cls}_{args.time}.tif")
             with rasterio.open(gs_out, "w", **tif_profile) as dst:
-                dst.write(class_cooling, 1)
+                dst.write(class_cooling.astype(np.float16), 1)
                 dst.update_tags(
                     1, description=f"Greenspace class {cls} cooling effect (Celsius)"
                 )
@@ -249,7 +249,7 @@ def main(args):
 
     out_path = os.path.join(output_dir, f"temperature_map_{args.time}.tif")
     with rasterio.open(out_path, "w", **tif_profile) as dst:
-        dst.write(temp_map, 1)
+        dst.write(temp_map.astype(np.float16), 1)
         dst.update_tags(1, description="Estimated air temperature (Celsius)")
 
     logger.info(f"Saved temperature to {out_path}")
