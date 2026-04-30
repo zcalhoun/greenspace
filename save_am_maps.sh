@@ -1,12 +1,12 @@
 #!/bin/bash
 
 #SBATCH --job-name=nn_save_am
-#SBATCH --array=1-21
+#SBATCH --array=0-21
 #SBATCH --mail-user=zachary.calhoun@duke.edu
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH -p carlsonlab-gpu
 #SBATCH --gres=gpu:1
-#SBATCH --mem=64G
+#SBATCH --mem=128G
 #SBATCH --output=./nn_save_am/%a.txt
 #SBATCH --error=./nn_save_am/%a.err
 
