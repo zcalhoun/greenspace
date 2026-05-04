@@ -2,6 +2,7 @@ import os
 import json
 import argparse
 import sys
+import pdb
 
 # Must be set before any CUDA-initializing imports.
 # Activated by --cuda-debug to make all CUDA ops synchronous so errors surface
@@ -22,8 +23,9 @@ from gpytorch.mlls import VariationalELBO
 
 sys.path.append("./src")
 from dataloader_v2 import GreenspaceDataset
-from model import CompleteModel
+from model import CompleteModel, Exponential
 from utils import SimpleLogger, lstsq_init
+from trainers import BayesianOptimization
 
 import pandas as pd
 
@@ -63,92 +65,62 @@ def main(args):
     logger.info("Performing block split of the data...")
     train_idx, test_idx = block_split(gs, args.num_clusters)
 
-    logger.info(
-        f"Train size: {len(np.concatenate(train_idx))}, Test size: {len(test_idx)}"
-    )
+    logger.info(f"Train size: {len(train_idx)}, Test size: {len(test_idx)}")
     ######
     # Initialize the training set up.
     ######
-    if args.test:
-        l2_lambdas = [1e-4]
-    else:
-        l2_lambdas = [1e-4, 1e-3, 1e-2, 1e-1, 1]
+    bo_variables = {"l2_penalty": (0.001, 1.0), "lengthscale": (50.0, 1000.0)}
 
-    if retry:
-        # Get the result, in the case that the job was cancelled.
-        saved_results, saved_lambdas = get_last_result(output_dir)
-        if len(saved_results) != 0:
-            results = saved_results
-        else:
-            results = []
-    else:
-        results = []
-        saved_lambdas = []
+    bayes_opt = BayesianOptimization(bo_variables, random_inits=10)
 
-    if len(results) < len(l2_lambdas):
-        for l2_penalty in l2_lambdas:
-            if l2_penalty in saved_lambdas:
-                continue
-            logger.info(f"Training with L2 penalty: {l2_penalty}")
+    train_dataset = Subset(gs, train_idx)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False)
+    for bo_iter in range(args.bayes_opt_iters):
+        trial = bayes_opt.get_next_trial()
+        l2_penalty = trial.parameters["l2_penalty"]
+        lengthscale = trial.parameters["lengthscale"]
+        logger.info(f"BO - {trial.type} - l2: {l2_penalty} - ls: {lengthscale}")
 
-            cross_val_result = cross_validation(gs, train_idx, l2_penalty, args)
-            # train_result, model, likelihood = train(
-            #     train_dataset, val_dataset, l2_penalty, args
-            # )
-            logger.info(f"Validation MSE: {cross_val_result['val_mse_mean']}")
-            results.append(cross_val_result["val_mse_mean"])
-            save_result(cross_val_result, output_dir)
-    else:
-        print("Skipping initial iterations...")
-        l2_lambdas = saved_lambdas
+        # Extract the features
+        coords, X, y = extract_features(gs, train_loader, lengthscale)
 
-    # Calculate number of iterations
-    if args.test:
-        num_bayes_opt = 1 + args.bayes_opt_iters - len(l2_lambdas)
-    else:
-        num_bayes_opt = 5 + args.bayes_opt_iters - len(l2_lambdas)
+        neg_elbo, model, likelihood = train_model
+    return
 
-    for i in range(num_bayes_opt):
-        # Get the next set of hyperparameters to try
-        logger.info(f"Bayesian optimization iteration {i + 1}")
 
-        l2_penalty = bopt_get_next_parameter(l2_lambdas, results)
-        logger.info(f"Next L2 penalty to try: {l2_penalty}")
-        # Train the model with these hyperparameters
-        # train_result, model, likelihood = train(
-        #     train_dataset, val_dataset, l2_penalty, args
-        # )
+def extract_features(gs, data_loader, lengthscale):
+    """
+    Use the exponential function to extract the features from each of the covariates.
+    """
+    ds_params = zip(gs.window_size, gs.num_dims, gs.dimension_resolution)
+    transforms = [
+        Exponential(
+            size=ws, num_dims=nd, dimension_resolution=dr, lengthscale=lengthscale
+        )
+        for ws, nd, dr in ds_params
+    ]
 
-        cross_val_result = cross_validation(gs, train_idx, l2_penalty, args)
-        logger.info(f"Validation MSE: {cross_val_result['val_mse_mean']}")
-        l2_lambdas.append(l2_penalty)
-        results.append(cross_val_result["val_mse_mean"])
-        save_result(cross_val_result, output_dir)
+    X = []
+    coords = []
+    y = []
+    with torch.no_grad():
+        for c, elev, stacked_window, temp in data_loader:
+            combined_window = torch.column_stack(
+                [t(s.flatten(start_dim=2)) for s, t in zip(stacked_window, transforms)]
+            )
 
-    #####
-    # Final model training with the best hyperparameters
-    #####
-    best_l2_penalty = l2_lambdas[np.argmin(results)]
-    logger.info(f"Best L2 penalty found: {best_l2_penalty}")
-    # combine training and validation datasets for final training
+            point = torch.column_stack(
+                [
+                    s[:, :, ws // 2, ws // 2]
+                    for ws, s in zip(gs.window_size, stacked_window)
+                ]
+            )
 
-    # full_train_idx = np.concatenate([train_idx, np.concatenate(val_idx)])
-    train_dataset = Subset(gs, np.concatenate(train_idx))
-    test_dataset = Subset(gs, test_idx)
+            X.extend(torch.column_stack([combined_window, point, elev]))
+            coords.extend(c)
+            y.extend(temp)
 
-    train_result, model, likelihood = train(
-        train_dataset, test_dataset, best_l2_penalty, args
-    )
-    logger.info(f"Test MSE with best L2 penalty: {train_result['val_mse']}")
-
-    with open(os.path.join(output_dir, "final_result.json"), "w") as f:
-        json.dump(train_result, f)
-
-    # Save
-    torch.save(model.state_dict(), os.path.join(output_dir, "final_model.pth"))
-    torch.save(
-        likelihood.state_dict(), os.path.join(output_dir, "final_likelihood.pth")
-    )
+    return torch.stack(coords), torch.stack(X), torch.stack(y)
 
 
 def get_last_result(output_dir):
@@ -658,7 +630,7 @@ def block_split(gs, num_clusters):
 
     training_size = int(num_clusters * 0.8)
 
-    train_idx = [indices[kmeans.labels_ == c] for c in clusters[:training_size]]
+    train_idx = indices[np.isin(kmeans.labels_, clusters[:training_size])]
     test_idx = indices[np.isin(kmeans.labels_, clusters[training_size:])]
 
     return train_idx, test_idx
@@ -745,7 +717,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--window-size",
-        default=51,
+        default=100,
         type=int,
         help="The size of the window to use for the input features.",
     )
