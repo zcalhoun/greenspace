@@ -74,20 +74,13 @@ def lstsq_init(model, train_loader, device, l2_penalty, init_l2_min=1e-2):
 
     # Run feature extraction on CPU: all results are moved to CPU anyway, and
     # keeping data off the GPU avoids device-side errors on large cities.
-    model.exp_weight.cpu()
-    try:
-        with torch.no_grad():
-            for c, e, s, y_batch in train_loader:
-                e = e.float()
-                s = s.float()
-                point = s[:, :, model.size // 2, model.size // 2]
-                linear_terms = model.exp_weight(s.flatten(start_dim=2))
-                ones = torch.ones(y_batch.size(0), 1)
-                X = torch.cat([e, point, linear_terms, ones], dim=1)
-                all_X.append(X)
-                all_y.append(y_batch.float())
-    finally:
-        model.exp_weight.to(device)
+    with torch.no_grad():
+        for c, X, y_batch in train_loader:
+            X = X.float()
+            ones = torch.ones(y_batch.size(0), 1)
+            X = torch.cat([X, ones], dim=1)
+            all_X.append(X)
+            all_y.append(y_batch.float())
 
     X = torch.cat(all_X, dim=0)  # (N, 1 + num_dims*2 + 1)
     y = torch.cat(all_y, dim=0)  # (N,)
@@ -100,13 +93,8 @@ def lstsq_init(model, train_loader, device, l2_penalty, init_l2_min=1e-2):
     b = X.T @ y
     solution = torch.linalg.solve(A, b)
 
-    # Unpack: elevation_weight (1) | beta (num_dims*2) | intercept (1)
     num_beta = model.beta.shape[0]
-    # elevation_weight = -softplus(raw), so raw = softplus_inverse(-elev)
-    # Clamp solution to be strictly negative before inverting.
-    elev_solution = solution[:1].clamp(max=-1e-3)
-    model.raw_elevation_weight.data.copy_(torch.log(torch.expm1(-elev_solution)))
-    model.beta.data.copy_(solution[1 : 1 + num_beta])
+    model.beta.data.copy_(solution[:-1])
     model.intercept.data.copy_(solution[-1])
 
 

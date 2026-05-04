@@ -55,7 +55,7 @@ class Exponential(nn.Module):
 
 
 class GPModel(ApproximateGP):
-    def __init__(self, inducing_points):
+    def __init__(self, inducing_points, min_lengthscale=None):
         variational_distribution = CholeskyVariationalDistribution(
             inducing_points.size(0)
         )
@@ -67,12 +67,28 @@ class GPModel(ApproximateGP):
         )
         super(GPModel, self).__init__(variational_strategy)
         self.mean_module = gpytorch.means.ZeroMean()
-        self.covar_module = (
-            gpytorch.kernels.ScaleKernel(gpytorch.kernels.MaternKernel(nu=0.5))
-            + gpytorch.kernels.LinearKernel()
-        )
 
-        self.covar_module.kernels[0].base_kernel.lengthscale.data = torch.tensor(1000.0)
+        if min_lengthscale is not None:
+            self.covar_module = (
+                gpytorch.kernels.ScaleKernel(
+                    gpytorch.kernels.MaternKernel(
+                        nu=0.5,
+                        lengthscale_constraint=gpytorch.constraints.GreaterThan(
+                            min_lengthscale / 1000.0
+                        ),
+                    )
+                )
+                + gpytorch.kernels.LinearKernel()
+            )
+
+            self.covar_module.kernels[0].base_kernel.lengthscale.data = torch.tensor(
+                1.5 * min_lengthscale / 1000.0
+            )
+        else:
+            self.covar_module = (
+                gpytorch.kernels.ScaleKernel(gpytorch.kernels.MaternKernel(nu=0.5))
+                + gpytorch.kernels.LinearKernel()
+            )
 
     def forward(self, x):
 
@@ -148,5 +164,31 @@ class CompleteModel(nn.Module):
         gp_output = self.gp_layer(c)
 
         new_mu = mu + gp_output.mean
+
+        return MultivariateNormal(new_mu, gp_output.lazy_covariance_matrix)
+
+
+class RidgeGP(nn.Module):
+    def __init__(
+        self,
+        num_dims: int,
+        lengthscale: float = 500.0,
+        num_inducing_points=100,
+        intercept=torch.tensor(15.0),
+    ):
+        super().__init__()
+        self.beta = nn.Parameter(torch.ones(num_dims))
+        self.intercept = nn.Parameter(intercept)
+        self.gp_layer = GPModel(
+            inducing_points=torch.randn(num_inducing_points, 2),
+            min_lengthscale=lengthscale,
+        )
+
+    def forward(self, c, X):
+        linear = X @ self.beta + self.intercept
+
+        gp_output = self.gp_layer(c)
+
+        new_mu = linear + gp_output.mean
 
         return MultivariateNormal(new_mu, gp_output.lazy_covariance_matrix)

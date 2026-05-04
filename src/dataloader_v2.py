@@ -171,7 +171,7 @@ class GreenspaceDataset(Dataset):
         # Standardize the coordinates
         coords_mean = coords.mean(axis=0)
         # coords_std = coords.std(axis=0)
-        coords = coords - coords_mean  # / coords_std
+        coords = (coords - coords_mean) / 1000  # put it in KM
 
         return coords
 

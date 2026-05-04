@@ -17,13 +17,13 @@ from sklearn.cluster import KMeans
 from sklearn.gaussian_process import GaussianProcessRegressor, kernels
 
 import torch
-from torch.utils.data import Dataset, DataLoader, Subset
+from torch.utils.data import TensorDataset, DataLoader, Subset
 from gpytorch.likelihoods import GaussianLikelihood
 from gpytorch.mlls import VariationalELBO
 
 sys.path.append("./src")
 from dataloader_v2 import GreenspaceDataset
-from model import CompleteModel, Exponential
+from model import CompleteModel, Exponential, RidgeGP
 from utils import SimpleLogger, lstsq_init
 from trainers import BayesianOptimization
 
@@ -84,8 +84,158 @@ def main(args):
         # Extract the features
         coords, X, y = extract_features(gs, train_loader, lengthscale)
 
-        neg_elbo, model, likelihood = train_model
-    return
+        # Normalize X
+        X_norm = normalize(X)
+        sub_ds = TensorDataset(coords, X_norm, y)
+        sub_loader = DataLoader(sub_ds, batch_size=args.batch_size, shuffle=True)
+        mll, model, likelihood = train_model(
+            gs, sub_loader, l2_penalty, lengthscale, args
+        )
+        trial.update(mll)
+
+        # pdb.set_trace()
+        logger.info(f"MLL: {mll:.2f}")
+        logger.info(f"Noise: {likelihood.noise.detach().item():.2f}")
+        logger.info(
+            f"Model ls {model.gp_layer.covar_module.kernels[0].base_kernel.lengthscale.detach().item():.2f}"
+        )
+
+
+def normalize(X):
+    mu = X.mean(axis=0)
+    std = X.std(axis=0)
+
+    X = (X - mu) / (std + 1e-8)
+
+    return X
+
+
+def train_model(gs, train_loader, l2_penalty, lengthscale, args):
+    num_inducing_points = args.num_inducing_points
+
+    # Set up mode
+    num_dims = sum(gs.num_dims) * 2 + 1
+    model = RidgeGP(
+        num_dims,
+        lengthscale=lengthscale,
+        num_inducing_points=num_inducing_points,
+        intercept=gs.init_temp,
+    )
+    likelihood = GaussianLikelihood()
+
+    use_cuda = torch.cuda.is_available()
+    device = torch.device("cuda" if use_cuda else "cpu")
+    model = model.to(device)
+    likelihood = likelihood.to(device)
+
+    # Initialize with least squares
+    lstsq_init(model, train_loader, device, l2_penalty)
+    # pdb.set_trace()
+    # Initialize inducing points
+    model.eval()
+    all_coords = []
+    all_residuals = []
+    with torch.no_grad():
+        for c, X, y_batch in train_loader:
+            c, X, y_batch = (
+                c.to(device),
+                X.to(device),
+                y_batch.to(device),
+            )
+            pred = model(c, X)
+            all_coords.append(c.cpu())
+            all_residuals.append((y_batch - pred.mean).cpu())
+
+    # pdb.set_trace()
+    all_coords = torch.cat(all_coords, dim=0)  # (N, 2)
+    all_residuals = torch.cat(all_residuals, dim=0)  # (N,) signed
+
+    k = min(num_inducing_points, len(all_coords))
+    inducing_points = _farthest_point_sample(all_coords, all_residuals.abs(), k).to(
+        device
+    )
+    model.gp_layer.variational_strategy.inducing_points.data.copy_(inducing_points)
+    logger.info(f"Initialized {k} inducing points via farthest-point sampling.")
+
+    dists = torch.cdist(inducing_points.cpu(), all_coords)  # (k, N)
+    nearest = dists.topk(k=min(10, len(all_coords)), dim=1, largest=False).indices
+    variational_mean = all_residuals[nearest].mean(dim=1).to(device)
+    model.gp_layer.variational_strategy._variational_distribution.variational_mean.data.copy_(
+        variational_mean
+    )
+
+    # Likelihood noise: pre-training MSE is a direct estimate of unexplained variance
+    pretrain_mse = (all_residuals**2).mean()
+    logger.info(f"Pre-train MSE {pretrain_mse}")
+    likelihood.noise_covar.noise = pretrain_mse.clamp(min=1e-4).to(device)
+
+    residual_var = all_residuals.var()
+    for kernel in model.gp_layer.covar_module.kernels:
+        kernel.outputscale = residual_var.clamp(min=1e-4).to(device)
+
+    logger.info(
+        f"GP init — noise: {pretrain_mse.item():.4f}, "
+        f"outputscale: {residual_var.item():.4f}"
+    )
+    # Set up optimizer
+    optimizer = torch.optim.Adam(
+        [
+            {"params": model.parameters()},
+            {"params": likelihood.parameters()},
+        ],
+        lr=args.lr,
+    )
+    total_iters = args.epochs * len(train_loader)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_iters)
+    mll = VariationalELBO(likelihood, model.gp_layer, num_data=len(all_coords))
+    best_train_loss = float("inf")
+
+    # Train for 10 epochs to fine-tune.
+    for i in range(args.epochs):
+        model.train()
+        likelihood.train()
+
+        epoch_train_loss = 0
+        epoch_train_count = 0
+        for c, X, y_batch in train_loader:
+            c, X, y_batch = (
+                c.to(device),
+                X.to(device),
+                y_batch.to(device),
+            )
+            optimizer.zero_grad()
+            output = model(c, X)
+            loss = -mll(output, y_batch)
+            loss += l2_penalty * model.beta.norm()
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+            epoch_train_loss += loss.item() * y_batch.size(0)
+            epoch_train_count += y_batch.size(0)
+
+        train_loss = epoch_train_loss / epoch_train_count
+        # training_result["train_loss"].append(train_loss)
+
+        logger.info(f"Epoch {i+1}/{args.epochs}, Train Loss: {train_loss:.4f}")
+
+    # Calculate -MLL
+    model.eval()
+    likelihood.eval()
+
+    loss = 0
+    with torch.no_grad():
+        for c, X, y_batch in train_loader:
+            c, X, y_batch = (
+                c.to(device),
+                X.to(device),
+                y_batch.to(device),
+            )
+            output = model(c, X)
+            loss -= mll(output, y_batch)
+
+    # Need to return -MLL as main-result, but we should monitor the
+    # terms of the GP, too, so we can observe performance.
+    return loss, model, likelihood
 
 
 def extract_features(gs, data_loader, lengthscale):
@@ -138,63 +288,63 @@ def get_last_result(output_dir):
         return [], []
 
 
-def cross_validation(gs, train_idx, l2_penalty, args, folds=5):
-    """
-    This function creates a separate dataloader based on splitting the
-    training index, then trains the model on 5 folds, so we can get
-    a less noisy estimate of the model's performance.
-    """
+# def cross_validation(gs, train_idx, l2_penalty, args, folds=5):
+#     """
+#     This function creates a separate dataloader based on splitting the
+#     training index, then trains the model on 5 folds, so we can get
+#     a less noisy estimate of the model's performance.
+#     """
 
-    training_errs = []
-    validation_errs = []
-    num_per_fold = len(train_idx) // folds
-    for i in range(folds):
-        logger.info(f"On CV fold {i} for L2 penalty {l2_penalty}...")
-        cv_train = train_idx.copy()
-        cv_val = np.concatenate(
-            [cv_train.pop(i * num_per_fold) for j in range(num_per_fold)]
-        )
-        cv_train = np.concatenate(cv_train)
+#     training_errs = []
+#     validation_errs = []
+#     num_per_fold = len(train_idx) // folds
+#     for i in range(folds):
+#         logger.info(f"On CV fold {i} for L2 penalty {l2_penalty}...")
+#         cv_train = train_idx.copy()
+#         cv_val = np.concatenate(
+#             [cv_train.pop(i * num_per_fold) for j in range(num_per_fold)]
+#         )
+#         cv_train = np.concatenate(cv_train)
 
-        train_ds = Subset(gs, cv_train)
-        val_ds = Subset(gs, cv_val)
+#         train_ds = Subset(gs, cv_train)
+#         val_ds = Subset(gs, cv_val)
 
-        # Use fewer inducing points and pretrain epochs during CV to save time
-        cv_result, _, _ = train(
-            train_ds,
-            val_ds,
-            l2_penalty,
-            args,
-            num_inducing_points=args.num_inducing_points,
-            pretrain_epochs=args.pretrain_epochs,
-        )
-        training_errs.append(cv_result["train_mse"])
-        validation_errs.append(cv_result["val_mse"])
+#         # Use fewer inducing points and pretrain epochs during CV to save time
+#         cv_result, _, _ = train(
+#             train_ds,
+#             val_ds,
+#             l2_penalty,
+#             args,
+#             num_inducing_points=args.num_inducing_points,
+#             pretrain_epochs=args.pretrain_epochs,
+#         )
+#         training_errs.append(cv_result["train_mse"])
+#         validation_errs.append(cv_result["val_mse"])
 
-    return {
-        "l2_penalty": l2_penalty,
-        "train_mse_mean": np.mean(training_errs).item(),
-        "train_mse_std": np.std(training_errs).item(),
-        "val_mse_mean": np.mean(validation_errs).item(),
-        "val_mse_std": np.std(validation_errs).item(),
-    }
+#     return {
+#         "l2_penalty": l2_penalty,
+#         "train_mse_mean": np.mean(training_errs).item(),
+#         "train_mse_std": np.std(training_errs).item(),
+#         "val_mse_mean": np.mean(validation_errs).item(),
+#         "val_mse_std": np.std(validation_errs).item(),
+#     }
 
 
-def bopt_get_next_parameter(l2_lambdas, results):
-    X = np.log(np.array(l2_lambdas)).reshape(-1, 1)
-    y = np.array(results)
+# def bopt_get_next_parameter(l2_lambdas, results):
+#     X = np.log(np.array(l2_lambdas)).reshape(-1, 1)
+#     y = np.array(results)
 
-    k = 0.5 * kernels.RBF()
-    gp = GaussianProcessRegressor(k, normalize_y=True)
-    gp.fit(X, y)
+#     k = 0.5 * kernels.RBF()
+#     gp = GaussianProcessRegressor(k, normalize_y=True)
+#     gp.fit(X, y)
 
-    test_points = np.logspace(-4, 0, 1000)
-    test_points = np.log(test_points).reshape(-1, 1)
+#     test_points = np.logspace(-4, 0, 1000)
+#     test_points = np.log(test_points).reshape(-1, 1)
 
-    mu, std = gp.predict(test_points, return_std=True)
+#     mu, std = gp.predict(test_points, return_std=True)
 
-    argmin = np.argmin(mu - std)
-    return np.exp(test_points[argmin][0])
+#     argmin = np.argmin(mu - std)
+#     return np.exp(test_points[argmin][0])
 
 
 def save_result(train_result, output_dir):
@@ -231,58 +381,6 @@ def _farthest_point_sample(coords, residuals, k):
         selected.append(min_dists.argmax().item())
 
     return coords[torch.tensor(selected)]
-
-
-def _lstsq_init(model, train_loader, device, l2_penalty, init_l2_min=1e-2):
-    """
-    Initialize model.beta, model.elevation_weight, and model.intercept via
-    ridge regression using the fixed initial exp_weight.
-
-    Assembles the full feature matrix [e | point | linear_terms | 1] over the
-    training set and solves the L2-regularized normal equations:
-
-        (X^T X + λ_init * I) w = X^T y
-
-    λ_init = max(l2_penalty, init_l2_min) decouples initialization stability
-    from the training penalty: small training lambdas produce near-singular
-    systems whose solutions have large coefficients and a large initial loss,
-    even though the collinearity means those coefficients cancel in practice.
-    A stronger initialization lambda gives a stable, moderate-norm starting
-    point that pre-training can then refine.
-
-    The intercept column is excluded from regularization.
-    """
-    init_lambda = max(l2_penalty, init_l2_min)
-    model.eval()
-    all_X = []
-    all_y = []
-
-    with torch.no_grad():
-        for c, e, s, y_batch in train_loader:
-            e, s, y_batch = e.to(device), s.to(device), y_batch.to(device)
-            point = s[:, :, model.size // 2, model.size // 2]
-            linear_terms = model.exp_weight(s.flatten(start_dim=2))
-            ones = torch.ones(y_batch.size(0), 1, device=device)
-            X = torch.cat([e, point, linear_terms, ones], dim=1)
-            all_X.append(X.cpu().float())
-            all_y.append(y_batch.cpu().float())
-
-    X = torch.cat(all_X, dim=0)  # (N, 1 + num_dims*2 + 1)
-    y = torch.cat(all_y, dim=0)  # (N,)
-
-    # Ridge normal equations: (X^T X + λ_init * I) w = X^T y
-    # Don't regularize the intercept (last column)
-    reg = init_lambda * torch.eye(X.shape[1])
-    reg[-1, -1] = 0.0
-    A = X.T @ X + reg
-    b = X.T @ y
-    solution = torch.linalg.solve(A, b)
-
-    # Unpack: elevation_weight (1) | beta (num_dims*2) | intercept (1)
-    num_beta = model.beta.shape[0]
-    model.elevation_weight.data.copy_(solution[:1])
-    model.beta.data.copy_(solution[1 : 1 + num_beta])
-    model.intercept.data.copy_(solution[-1])
 
 
 def train(
@@ -433,10 +531,10 @@ def train(
     pretrain_mse = (all_residuals**2).mean()
     likelihood.noise_covar.noise = pretrain_mse.clamp(min=1e-4).to(device)
 
-    # Kernel outputscale: residual variance sets the GP's amplitude
-    residual_var = all_residuals.var()
-    for kernel in model.gp_layer.covar_module.kernels:
-        kernel.outputscale = residual_var.clamp(min=1e-4).to(device)
+    # # Kernel outputscale: residual variance sets the GP's amplitude
+    # residual_var = all_residuals.var()
+    # for kernel in model.gp_layer.covar_module.kernels:
+    #     kernel.outputscale = residual_var.clamp(min=1e-4).to(device)
 
     logger.info(
         f"GP init — noise: {pretrain_mse.item():.4f}, "
