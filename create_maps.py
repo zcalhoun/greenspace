@@ -14,6 +14,7 @@ import rasterio
 import numpy as np
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, Subset
 from gpytorch.likelihoods import GaussianLikelihood
 from gpytorch.mlls import VariationalELBO
@@ -83,6 +84,7 @@ def fit_model(dataset, args):
     num_inducing_points = args.num_inducing_points
     pretrain_epochs = args.pretrain_epochs
     l2_penalty = args.l2_penalty
+    hinge_lambda = 10
 
     model = CompleteModel(
         size=dataset.window_size,
@@ -149,9 +151,18 @@ def fit_model(dataset, args):
                 loss = mse_loss_fn(output, y_batch)
                 loss += l2_penalty * model.beta.norm()
                 loss += (
-                    args.intercept_penalty
-                    * (model.min_temp - model.intercept).clamp(min=0) ** 2
+                    hinge_lambda
+                    * F.relu(
+                        model.exp_weight.lengthscale
+                        - model.gp_layer.covar_module.kernels[
+                            0
+                        ].base_kernel.lengthscale[0]
+                    )[0]
                 )
+                # loss += (
+                #     args.intercept_penalty
+                #     * (model.min_temp - model.intercept).clamp(min=0) ** 2
+                # )
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             if args.grad_clip > 0:

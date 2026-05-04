@@ -41,34 +41,30 @@ def _pixel_size_metres(raster_obj):
     return float(dist_m)
 
 
-_NLCD_CLASSES = [
-    11,
-    12,
-    21,
-    22,
-    23,
-    24,
-    31,
-    41,
-    42,
-    43,
-    51,
-    52,
-    71,
-    72,
-    73,
-    74,
-    81,
-    82,
-    90,
-    95,
-]
-_GREEN_CLASSES = [2, 4, 6, 8, 10, 12, 13, 14]
-
-
 class GreenspaceDataset(Dataset):
-    """ """
-
+    _NLCD_CLASSES = [
+        11,
+        12,
+        21,
+        22,
+        23,
+        24,
+        31,
+        41,
+        42,
+        43,
+        51,
+        52,
+        71,
+        72,
+        73,
+        74,
+        81,
+        82,
+        90,
+        95,
+    ]
+    _GREEN_CLASSES = [2, 4, 6, 8, 10, 12, 13, 14]
     # Precomputed LUTs: raw raster value → class index (0-based).
     # Sized +2 so the last slot acts as a dump index (num_classes) for any
     # value clamped above the valid range or not present in the class list.
@@ -89,7 +85,7 @@ class GreenspaceDataset(Dataset):
         data_dir=None,
         greenspace=False,
         time="pm",
-        window_size=51,
+        window_size=500,  # Distance in meters.
         ndvi_albedo=True,
         non_negative=False,
     ):
@@ -110,11 +106,15 @@ class GreenspaceDataset(Dataset):
         gdf = gpd.read_file(temp_file)
 
         # Second, we load the rasters.
-        nlcd = ClassificationRaster(os.path.join(data_dir, "nlcd.tif"), window_size)
+        nlcd_ws = 2 * (window_size // 30) + 1
+        nlcd = ClassificationRaster(os.path.join(data_dir, "nlcd.tif"), nlcd_ws)
+
+        gs_ws = 2 * (window_size // 0.6) + 1
         greenspace = ClassificationRaster(
-            os.path.join(data_dir, "greenspace.tif"), window_size
+            os.path.join(data_dir, "greenspace.tif"), gs_ws
         )
-        ndvi_albedo = NDVIAlbedo(os.path.join(data_dir, "ndvi_albedo.tif"), window_size)
+        na_ws = 2 * (window_size // 10) + 1
+        ndvi_albedo = NDVIAlbedo(os.path.join(data_dir, "ndvi_albedo.tif"), na_ws)
 
         # For each of the rasters, we filter out the coordinates that do not
         # have a complete dataset.
@@ -137,8 +137,8 @@ class GreenspaceDataset(Dataset):
             self.init_temp = torch.tensor(float(self.temp.min()), dtype=torch.float32)
         else:
             self.init_temp = t
-        self.window_size = s.size(1)
-        self.num_dims = s.size(0)
+        self.window_size = [w.size(1) for w in s]
+        self.num_dims = [w.size(0) for w in s]
 
     def __len__(self):
         return len(self.temp)
@@ -153,13 +153,13 @@ class GreenspaceDataset(Dataset):
         affine transform, which is in metres for projected CRS.
         """
         nlcd_res = _pixel_size_metres(self.nlcd)
-        resolutions = [nlcd_res] * len(_NLCD_CLASSES)
+        resolutions = [nlcd_res]
         if self.return_greenspace:
             gs_res = _pixel_size_metres(self.greenspace)
-            resolutions += [gs_res] * len(_GREEN_CLASSES)
+            resolutions.append(gs_res)
         if self.return_ndvi_albedo:
             ndvi_res = _pixel_size_metres(self.ndvi_albedo)
-            resolutions += [ndvi_res] * 2  # NDVI, albedo
+            resolutions.append(ndvi_res)
         return np.array(resolutions, dtype=np.float32)
 
     def _extract_coords(self, gdf):
@@ -170,8 +170,8 @@ class GreenspaceDataset(Dataset):
 
         # Standardize the coordinates
         coords_mean = coords.mean(axis=0)
-        coords_std = coords.std(axis=0)
-        coords = (coords - coords_mean) / coords_std
+        # coords_std = coords.std(axis=0)
+        coords = coords - coords_mean  # / coords_std
 
         return coords
 
@@ -224,7 +224,7 @@ class GreenspaceDataset(Dataset):
         temp = torch.tensor(self.temp[idx], dtype=torch.float32)
 
         nlcd_oh = self._create_one_hot(
-            nlcd_window, self._NLCD_LUT, len(_NLCD_CLASSES)
+            nlcd_window, self._NLCD_LUT, len(self._NLCD_CLASSES)
         ).permute(
             2, 0, 1
         )  # (C, H, W)
@@ -232,7 +232,7 @@ class GreenspaceDataset(Dataset):
         if self.return_greenspace:
             greenspace_window = torch.from_numpy(self.greenspace[idx]).long()
             gs_oh = self._create_one_hot(
-                greenspace_window, self._GS_LUT, len(_GREEN_CLASSES)
+                greenspace_window, self._GS_LUT, len(self._GREEN_CLASSES)
             ).permute(
                 2, 0, 1
             )  # (C, H, W)
@@ -241,11 +241,11 @@ class GreenspaceDataset(Dataset):
                 gs_oh = -gs_oh
             # Add the NDVI and albedo channels to the stacked window
             if self.return_ndvi_albedo:
-                stacked_window = torch.cat([nlcd_oh, gs_oh, ndvi_albedo_window], dim=0)
+                stacked_window = (nlcd_oh, gs_oh, ndvi_albedo_window)
             else:
-                stacked_window = torch.cat([nlcd_oh, gs_oh], dim=0)
+                stacked_window = (nlcd_oh, gs_oh)
         else:
-            stacked_window = torch.cat([nlcd_oh, ndvi_albedo_window], dim=0)
+            stacked_window = (nlcd_oh, ndvi_albedo_window)
 
         return coords, elev, stacked_window, temp
 
@@ -258,6 +258,55 @@ class GreenspaceDataset(Dataset):
         return F.one_hot(indices, num_classes=num_classes + 1).float()[
             ..., :num_classes
         ]
+
+
+class CausalGreenspaceDataset(GreenspaceDataset):
+    """
+    This class just re-defines the reference classes
+    """
+
+    _NLCD_CLASSES = [
+        11,
+        12,
+        21,
+        22,
+        23,
+        24,
+        31,
+        81,
+        82,
+        90,
+        95,
+    ]
+    _GREEN_CLASSES = [0, 2, 4, 6, 8, 10, 12, 13, 14]
+    _NLCD_LUT = torch.full(
+        (max(_NLCD_CLASSES) + 2,), len(_NLCD_CLASSES), dtype=torch.long
+    )
+    for _idx, _val in enumerate(_NLCD_CLASSES):
+        _NLCD_LUT[_val] = _idx
+
+    _GS_LUT = torch.full(
+        (max(_GREEN_CLASSES) + 2,), len(_GREEN_CLASSES), dtype=torch.long
+    )
+    for _idx, _val in enumerate(_GREEN_CLASSES):
+        _GS_LUT[_val] = _idx
+
+    def __init__(
+        self,
+        data_dir=None,
+        greenspace=True,
+        time="pm",
+        window_size=500,  # Distance in meters.
+        ndvi_albedo=False,
+        non_negative=False,
+    ):
+        super().__init__(
+            data_dir,
+            greenspace=greenspace,
+            time=time,
+            window_size=window_size,
+            ndvi_albedo=ndvi_albedo,
+        )
 
 
 def load_metadata(meta_path: str):
@@ -307,7 +356,7 @@ class RasterObject:
     def __getitem__(self, idx):
         row, col = self.coords[idx]
 
-        half_window = self.window_size // 2
+        half_window = int(self.window_size // 2)
         return self.data[
             row - half_window : row + half_window + 1,
             col - half_window : col + half_window + 1,

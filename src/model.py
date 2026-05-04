@@ -33,7 +33,7 @@ class Exponential(nn.Module):
         self.register_buffer("dist", dist)
 
         if dimension_resolution is not None:
-            res = dimension_resolution.float().view(num_dims, 1)
+            res = torch.ones(num_dims, 1) * torch.tensor(dimension_resolution)
         else:
             res = torch.ones(num_dims, 1)
         self.register_buffer("dimension_resolution", res)
@@ -71,6 +71,8 @@ class GPModel(ApproximateGP):
             gpytorch.kernels.ScaleKernel(gpytorch.kernels.MaternKernel(nu=0.5))
             + gpytorch.kernels.LinearKernel()
         )
+
+        self.covar_module.kernels[0].base_kernel.lengthscale.data = torch.tensor(1000.0)
 
     def forward(self, x):
 
