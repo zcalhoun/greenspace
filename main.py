@@ -75,6 +75,7 @@ def main(args):
 
     train_dataset = Subset(gs, train_idx)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False)
+    trial_artifacts = []
     for bo_iter in range(args.bayes_opt_iters):
         trial = bayes_opt.get_next_trial()
         l2_penalty = trial.parameters["l2_penalty"]
@@ -85,35 +86,106 @@ def main(args):
         coords, X, y = extract_features(gs, train_loader, lengthscale)
 
         # Normalize X
-        X_norm = normalize(X)
+        X_norm, X_mean, X_std = normalize(X)
         sub_ds = TensorDataset(coords, X_norm, y)
         sub_loader = DataLoader(sub_ds, batch_size=args.batch_size, shuffle=True)
-        mll, model, likelihood = train_model(
+        mll_tensor, model, likelihood = train_model(
             gs, sub_loader, l2_penalty, lengthscale, args
         )
-        trial.update(mll)
+        mll_scalar = mll_tensor.item()
+        trial.update(mll_scalar)
 
-        # pdb.set_trace()
-        logger.info(f"MLL: {mll:.2f}")
+        logger.info(f"MLL: {mll_scalar:.2f}")
         logger.info(f"Noise: {likelihood.noise.detach().item():.2f}")
         logger.info(
             f"Model ls {model.gp_layer.covar_module.kernels[0].base_kernel.lengthscale.detach().item():.2f}"
         )
-        # TODO: after each iteration:
-        # Append mll, model state dict, likelihood state dict, lengthscale, l2_penalty
-        # X mean and standard deviation to a json object with all of the results.
+
+        trial_artifacts.append(
+            {
+                "mll": mll_scalar,
+                "l2_penalty": float(l2_penalty),
+                "lengthscale": float(lengthscale),
+                "X_mean": X_mean,
+                "X_std": X_std,
+                "model": model,
+                "likelihood": likelihood,
+            }
+        )
+        save_result(
+            {
+                "bo_iter": bo_iter,
+                "trial_type": trial.type,
+                "mll": mll_scalar,
+                "l2_penalty": float(l2_penalty),
+                "lengthscale": float(lengthscale),
+            },
+            output_dir,
+        )
 
     best_trial = bayes_opt.get_best_trial()
-    # TODO: write results
+    best_idx = bayes_opt.trials.index(best_trial)
+    best_artifact = trial_artifacts[best_idx]
+    best_model = best_artifact["model"]
+    best_likelihood = best_artifact["likelihood"]
+
+    torch.save(best_model.state_dict(), os.path.join(output_dir, "final_model.pth"))
+    torch.save(
+        best_likelihood.state_dict(), os.path.join(output_dir, "final_likelihood.pth")
+    )
+
+    # Evaluate on held-out test set using the best trial's feature transform and normalization
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    test_dataset = Subset(gs, test_idx)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
+    test_coords, test_X, test_y = extract_features(
+        gs, test_loader, best_artifact["lengthscale"]
+    )
+    test_X_norm = (test_X - best_artifact["X_mean"]) / (best_artifact["X_std"] + 1e-8)
+    test_ds = TensorDataset(test_coords, test_X_norm, test_y)
+    test_loader_norm = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
+
+    best_model.eval()
+    best_likelihood.eval()
+    all_preds = []
+    with torch.no_grad():
+        for c, X_batch, _ in test_loader_norm:
+            c, X_batch = c.to(device), X_batch.to(device)
+            all_preds.append(best_model(c, X_batch).mean.cpu())
+
+    preds = torch.cat(all_preds)
+    test_mse = ((preds - test_y) ** 2).mean().item()
+    ss_tot = ((test_y - test_y.mean()) ** 2).sum().item()
+    test_r2 = (
+        (1 - ((preds - test_y) ** 2).sum().item() / ss_tot)
+        if ss_tot > 0
+        else float("nan")
+    )
+
+    final_result = {
+        "best_bo_iter": best_idx,
+        "best_mll": best_artifact["mll"],
+        "best_l2_penalty": best_artifact["l2_penalty"],
+        "best_lengthscale": best_artifact["lengthscale"],
+        "test_mse": test_mse,
+        "test_r2": test_r2,
+        "X_mean": best_artifact["X_mean"].tolist(),
+        "X_std": best_artifact["X_std"].tolist(),
+    }
+    with open(os.path.join(output_dir, "final_result.json"), "w") as f:
+        json.dump(final_result, f, indent=2)
+
+    logger.info(
+        f"Best trial (iter {best_idx}): l2={best_artifact['l2_penalty']:.4f}, "
+        f"ls={best_artifact['lengthscale']:.1f}, MLL={best_artifact['mll']:.4f}"
+    )
+    logger.info(f"Test MSE: {test_mse:.4f}, Test R²: {test_r2:.4f}")
 
 
 def normalize(X):
     mu = X.mean(axis=0)
     std = X.std(axis=0)
-
-    X = (X - mu) / (std + 1e-8)
-
-    return X
+    return (X - mu) / (std + 1e-8), mu, std
 
 
 def train_model(gs, train_loader, l2_penalty, lengthscale, args):
@@ -381,12 +453,6 @@ if __name__ == "__main__":
         help="Directory to save the output plots and results.",
     )
     parser.add_argument(
-        "--pretrain-epochs",
-        type=int,
-        default=10,
-        help="Number of epochs to pre-train the linear part of the model.",
-    )
-    parser.add_argument(
         "--epochs",
         default=50,
         type=int,
@@ -406,30 +472,15 @@ if __name__ == "__main__":
         help="Learning rate for the main training loop.",
     )
     parser.add_argument(
-        "--patience",
-        default=5,
-        type=int,
-        help="Number of epochs to wait for improvement before early stopping.",
-    )
-    parser.add_argument(
         "--bayes-opt-iters",
-        default=5,
+        default=50,
         type=int,
         help="Number of iterations to perform for Bayesian optimization of the L2 penalty.",
-    )
-    parser.add_argument(
-        "--pretrain-lr", default=0.01, type=float, help="Pre-training learning rate."
     )
     parser.add_argument(
         "--greenspace",
         action="store_true",
         help="Whether to include the greenspace window as part of the input features.",
-    )
-    parser.add_argument(
-        "--threshold",
-        default=0.001,
-        type=float,
-        help="Minimum improvement threshold for early stopping patience.",
     )
     # Add time to be one of ["am", "af", "pm"]
     parser.add_argument(
@@ -449,49 +500,10 @@ if __name__ == "__main__":
         "--test", action="store_true", help="Whether to run in test mode."
     )
     parser.add_argument(
-        "--num-workers",
-        type=int,
-        default=2,
-        help="Number of DataLoader worker processes.",
-    )
-    parser.add_argument(
         "--num-inducing-points",
         type=int,
         default=10,
         help="Number of GP inducing points for the final model.",
-    )
-    parser.add_argument(
-        "--amp",
-        action="store_true",
-        help="Enable automatic mixed precision (CUDA only).",
-    )
-    parser.add_argument(
-        "--grad-clip",
-        type=float,
-        default=1.0,
-        help="Max gradient norm for clipping (0 to disable).",
-    )
-    parser.add_argument(
-        "--lr-factor",
-        type=float,
-        default=0.5,
-        help="Factor by which ReduceLROnPlateau reduces the pre-training learning rate.",
-    )
-    parser.add_argument(
-        "--lr-patience",
-        type=int,
-        default=3,
-        help="Epochs with no improvement before ReduceLROnPlateau reduces pre-training LR.",
-    )
-    parser.add_argument(
-        "--cuda-debug",
-        action="store_true",
-        help=(
-            "Set CUDA_LAUNCH_BLOCKING=1 to make all CUDA ops synchronous. "
-            "Surfaces illegal memory access errors at the correct call site "
-            "instead of a later sync point. Significantly slows training — "
-            "use only for debugging."
-        ),
     )
     arguments = parser.parse_args()
     main(arguments)
