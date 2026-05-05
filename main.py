@@ -17,13 +17,14 @@ from sklearn.cluster import KMeans
 from sklearn.gaussian_process import GaussianProcessRegressor, kernels
 
 import torch
+import gpytorch
 from torch.utils.data import TensorDataset, DataLoader, Subset
 from gpytorch.likelihoods import GaussianLikelihood
 from gpytorch.mlls import VariationalELBO
 
 sys.path.append("./src")
 from dataloader_v2 import GreenspaceDataset
-from model import CompleteModel, Exponential, RidgeGP
+from model import CompleteModel, RidgeGP
 from utils import SimpleLogger, lstsq_init
 from trainers import BayesianOptimization
 
@@ -76,9 +77,6 @@ def main(args):
 
     train_dataset = Subset(gs, train_idx)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False)
-    extract_loader = DataLoader(
-        train_dataset, batch_size=args.extract_batch_size, shuffle=False
-    )
     trial_artifacts = []
     for bo_iter in range(args.bayes_opt_iters):
         trial = bayes_opt.get_next_trial()
@@ -86,8 +84,8 @@ def main(args):
         lengthscale = trial.parameters["lengthscale"]
         logger.info(f"BO - {trial.type} - l2: {l2_penalty} - ls: {lengthscale}")
 
-        # Extract the features
-        coords, X, y = extract_features(gs, extract_loader, lengthscale)
+        # Precompute full-raster features (FFT conv), then point-lookup per sample.
+        coords, X, y = extract_features(gs, train_idx, lengthscale)
 
         # Normalize X
         X_norm, X_mean, X_std = normalize(X)
@@ -140,12 +138,8 @@ def main(args):
 
     # Evaluate on held-out test set using the best trial's feature transform and normalization
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    test_dataset = Subset(gs, test_idx)
-    test_loader = DataLoader(
-        test_dataset, batch_size=args.extract_batch_size, shuffle=False
-    )
     test_coords, test_X, test_y = extract_features(
-        gs, test_loader, best_artifact["lengthscale"]
+        gs, test_idx, best_artifact["lengthscale"]
     )
     test_X_norm = (test_X - best_artifact["X_mean"]) / (best_artifact["X_std"] + 1e-8)
     test_ds = TensorDataset(test_coords, test_X_norm, test_y)
@@ -186,6 +180,40 @@ def main(args):
         f"ls={best_artifact['lengthscale']:.1f}, MLL={best_artifact['mll']:.4f}"
     )
     logger.info(f"Test MSE: {test_mse:.4f}, Test R²: {test_r2:.4f}")
+
+    # Refit on all data (train + test) using the best hyperparameters.
+    # The test metrics above are an honest estimate of generalisation error;
+    # now use every available observation to get the best possible spatial model.
+    logger.info("Refitting final model on all data (train + test) …")
+    all_idx = np.concatenate([train_idx, test_idx])
+    coords_all, X_all, y_all = extract_features(
+        gs, all_idx, best_artifact["lengthscale"]
+    )
+    X_all_norm, X_all_mean, X_all_std = normalize(X_all)
+    all_ds = TensorDataset(coords_all, X_all_norm, y_all)
+    all_loader = DataLoader(all_ds, batch_size=args.batch_size, shuffle=True)
+    _, final_model, final_likelihood = train_model(
+        gs, all_loader, best_artifact["l2_penalty"], best_artifact["lengthscale"], args
+    )
+
+    # Overwrite the saved weights with the all-data model.
+    torch.save(final_model.state_dict(), os.path.join(output_dir, "final_model.pth"))
+    torch.save(
+        final_likelihood.state_dict(),
+        os.path.join(output_dir, "final_likelihood.pth"),
+    )
+
+    # Build an artifact for predict_raster that reflects the full-data normalisation.
+    final_artifact = {
+        **best_artifact,
+        "X_mean": X_all_mean,
+        "X_std": X_all_std,
+    }
+
+    logger.info("Generating full-raster temperature prediction …")
+    predict_raster(
+        gs, final_model, final_likelihood, final_artifact, output_dir, args
+    )
 
 
 def normalize(X):
@@ -322,39 +350,26 @@ def train_model(gs, train_loader, l2_penalty, lengthscale, args):
     return loss, model, likelihood
 
 
-def extract_features(gs, data_loader, lengthscale):
+def extract_features(gs, indices, lengthscale):
     """
-    Use the exponential function to extract the features from each of the covariates.
+    Precompute full-raster exponentially-weighted features via FFT convolution,
+    then perform vectorised point lookups for the requested sample indices.
+
+    The convolution result is cached inside ``gs``; repeated calls with the
+    same lengthscale pay only the lookup cost.
+
+    Args:
+        gs:          GreenspaceDataset instance
+        indices:     array-like of integer sample indices
+        lengthscale: kernel decay lengthscale in metres
+
+    Returns:
+        coords: (N, 2) float tensor
+        X:      (N, D) float tensor of features
+        y:      (N,)  float tensor of temperatures
     """
-    ds_params = zip(gs.window_size, gs.num_dims, gs.dimension_resolution)
-    transforms = [
-        Exponential(
-            size=ws, num_dims=nd, dimension_resolution=dr, lengthscale=lengthscale
-        )
-        for ws, nd, dr in ds_params
-    ]
-
-    X = []
-    coords = []
-    y = []
-    with torch.no_grad():
-        for c, elev, stacked_window, temp in data_loader:
-            combined_window = torch.column_stack(
-                [t(s.flatten(start_dim=2)) for s, t in zip(stacked_window, transforms)]
-            )
-
-            point = torch.column_stack(
-                [
-                    s[:, :, ws // 2, ws // 2]
-                    for ws, s in zip(gs.window_size, stacked_window)
-                ]
-            )
-
-            X.extend(torch.column_stack([combined_window, point, elev]))
-            coords.extend(c)
-            y.extend(temp)
-
-    return torch.stack(coords), torch.stack(X), torch.stack(y)
+    gs.precompute_features(lengthscale)
+    return gs.get_all_features(np.asarray(indices))
 
 
 def get_last_result(output_dir):
@@ -406,6 +421,76 @@ def _farthest_point_sample(coords, residuals, k):
         selected.append(min_dists.argmax().item())
 
     return coords[torch.tensor(selected)]
+
+
+def predict_raster(gs, model, likelihood, best_artifact, output_dir, args, tile_rows=256):
+    """
+    Tile the NLCD raster and predict temperature at every pixel.
+
+    Writes ``<output_dir>/prediction.tif``: a two-band float32 GeoTIFF in the
+    NLCD raster's CRS and extent.
+      Band 1 — posterior predictive mean (°C)
+      Band 2 — posterior predictive std  (°C)
+
+    The predictive distribution (from ``likelihood(model(c, X))``) includes
+    observation noise, giving a realistic uncertainty estimate.
+
+    Args:
+        gs:            GreenspaceDataset (precompute_features already called for
+                       best_artifact["lengthscale"])
+        model:         trained RidgeGP
+        likelihood:    trained GaussianLikelihood
+        best_artifact: dict with keys "lengthscale", "X_mean", "X_std"
+        output_dir:    directory where prediction.tif is written
+        args:          parsed CLI args (used for batch_size)
+        tile_rows:     number of NLCD rows to process per tile
+    """
+    import rasterio
+
+    gs.precompute_features(best_artifact["lengthscale"])
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.eval()
+    likelihood.eval()
+
+    X_mean = best_artifact["X_mean"]
+    X_std = best_artifact["X_std"]
+
+    H, W = gs.nlcd.data.shape
+    pred_mean = np.full((H, W), np.nan, dtype=np.float32)
+    pred_std = np.full((H, W), np.nan, dtype=np.float32)
+
+    for row_start in range(0, H, tile_rows):
+        row_end = min(row_start + tile_rows, H)
+        logger.info(f"Predicting tile rows {row_start}–{row_end} / {H}")
+
+        coords, X = gs.get_raster_tile(row_start, row_end)
+        X_norm = (X - X_mean) / (X_std + 1e-8)
+
+        with torch.no_grad(), gpytorch.settings.fast_pred_var():
+            f_pred = model(coords.to(device), X_norm.to(device))
+            y_pred = likelihood(f_pred)
+            mu = y_pred.mean.cpu().numpy()
+            var = y_pred.variance.cpu().numpy()
+
+        tile_H = row_end - row_start
+        pred_mean[row_start:row_end, :] = mu.reshape(tile_H, W)
+        pred_std[row_start:row_end, :] = np.sqrt(np.maximum(var, 0.0)).reshape(
+            tile_H, W
+        )
+
+    out_path = os.path.join(output_dir, "prediction.tif")
+    with rasterio.open(gs.nlcd.data_dir) as ref:
+        profile = ref.profile.copy()
+    profile.update(count=2, dtype="float32", nodata=float("nan"))
+
+    with rasterio.open(out_path, "w", **profile) as dst:
+        dst.write(pred_mean, 1)
+        dst.write(pred_std, 2)
+        dst.update_tags(1, description="Posterior predictive mean temperature (°C)")
+        dst.update_tags(2, description="Posterior predictive std (°C)")
+
+    logger.info(f"Prediction raster saved → {out_path}")
 
 
 def block_split(gs, num_clusters):
@@ -470,15 +555,6 @@ if __name__ == "__main__":
         type=int,
         default=256,
         help="The batch size number to use for training.",
-    )
-    parser.add_argument(
-        "--extract-batch-size",
-        type=int,
-        default=16,
-        help=(
-            "Batch size used by extract_features. Kept small to bound the peak "
-            "memory of the flattened window tensor before Exponential compresses it."
-        ),
     )
     parser.add_argument(
         "--lr",
