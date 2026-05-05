@@ -57,6 +57,7 @@ def main(args):
             greenspace=args.greenspace,
             time=args.time,
             window_size=args.window_size,
+            gs_downsample=args.gs_downsample,
         )
     except ValueError as e:
         logger.error(f"Problem opening up dataset for {city}: {e}")
@@ -75,6 +76,9 @@ def main(args):
 
     train_dataset = Subset(gs, train_idx)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False)
+    extract_loader = DataLoader(
+        train_dataset, batch_size=args.extract_batch_size, shuffle=False
+    )
     trial_artifacts = []
     for bo_iter in range(args.bayes_opt_iters):
         trial = bayes_opt.get_next_trial()
@@ -83,7 +87,7 @@ def main(args):
         logger.info(f"BO - {trial.type} - l2: {l2_penalty} - ls: {lengthscale}")
 
         # Extract the features
-        coords, X, y = extract_features(gs, train_loader, lengthscale)
+        coords, X, y = extract_features(gs, extract_loader, lengthscale)
 
         # Normalize X
         X_norm, X_mean, X_std = normalize(X)
@@ -137,7 +141,9 @@ def main(args):
     # Evaluate on held-out test set using the best trial's feature transform and normalization
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     test_dataset = Subset(gs, test_idx)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
+    test_loader = DataLoader(
+        test_dataset, batch_size=args.extract_batch_size, shuffle=False
+    )
     test_coords, test_X, test_y = extract_features(
         gs, test_loader, best_artifact["lengthscale"]
     )
@@ -466,6 +472,15 @@ if __name__ == "__main__":
         help="The batch size number to use for training.",
     )
     parser.add_argument(
+        "--extract-batch-size",
+        type=int,
+        default=16,
+        help=(
+            "Batch size used by extract_features. Kept small to bound the peak "
+            "memory of the flattened window tensor before Exponential compresses it."
+        ),
+    )
+    parser.add_argument(
         "--lr",
         default=0.01,
         type=float,
@@ -495,6 +510,17 @@ if __name__ == "__main__":
         default=100,
         type=int,
         help="The size of the window to use for the input features.",
+    )
+    parser.add_argument(
+        "--gs-downsample",
+        type=int,
+        default=1,
+        help=(
+            "Spatial downsampling factor applied to the greenspace window before "
+            "the Exponential transform. The greenspace raster is 0.6 m/pixel, so "
+            "sub-pixel detail is wasted; a factor of 5 reduces it to 3 m/pixel and "
+            "shrinks the intermediate tensor area by 25×. Use 1 (default) to disable."
+        ),
     )
     parser.add_argument(
         "--test", action="store_true", help="Whether to run in test mode."

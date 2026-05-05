@@ -88,6 +88,7 @@ class GreenspaceDataset(Dataset):
         window_size=500,  # Distance in meters.
         ndvi_albedo=True,
         non_negative=False,
+        gs_downsample=1,
     ):
         """
         Data_dir is the directory of the source data.
@@ -100,6 +101,7 @@ class GreenspaceDataset(Dataset):
         self.return_greenspace = greenspace
         self.return_ndvi_albedo = ndvi_albedo
         self.non_negative = non_negative
+        self.gs_downsample = int(gs_downsample)
 
         # First, we are going to load the coordinates
         temp_file = os.path.join(data_dir, time, "trav.shp")
@@ -236,6 +238,15 @@ class GreenspaceDataset(Dataset):
             ).permute(
                 2, 0, 1
             )  # (C, H, W)
+
+            if self.gs_downsample > 1:
+                # Reduce the greenspace window resolution before storing.
+                # avg_pool2d expects (N, C, H, W); add/remove the batch dim.
+                gs_oh = F.avg_pool2d(
+                    gs_oh.unsqueeze(0),
+                    kernel_size=self.gs_downsample,
+                    stride=self.gs_downsample,
+                ).squeeze(0)
 
             if self.non_negative:
                 gs_oh = -gs_oh

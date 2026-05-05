@@ -21,4 +21,5 @@ python main.py \
     --batch-size 128 \
     --window-size 500 \
     --bayes-opt-iters 50 \
-    --greenspace
+    --greenspace \
+    --gs-downsample 5
