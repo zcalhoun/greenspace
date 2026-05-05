@@ -42,7 +42,8 @@ class BayesianOptimization:
         return cp
 
     def get_next_trial(self):
-        if len(self.trials) < self.random_inits:
+        completed = [t for t in self.trials if not t.skipped]
+        if len(completed) < self.random_inits:
             # Randomly sample from the bounds
             parameters = {}
             for v in self.variables.keys():
@@ -68,8 +69,9 @@ class BayesianOptimization:
         return next_trial
 
     def _collect_trials(self):
-        X = [list(t.parameters.values()) for t in self.trials]
-        y = [t.result for t in self.trials]
+        completed = [t for t in self.trials if not t.skipped]
+        X = [list(t.parameters.values()) for t in completed]
+        y = [t.result for t in completed]
 
         return np.array(X), np.array(y)
 
@@ -77,12 +79,15 @@ class BayesianOptimization:
         """
         Return the trial instance that has the best performance.
         """
-        results = [t.result for t in self.trials]
+        completed = [t for t in self.trials if not t.skipped]
+        if not completed:
+            raise RuntimeError("No completed (non-skipped) trials to select from.")
+        results = [t.result for t in completed]
 
         if self.minimize:
-            return self.trials[np.argmin(results)]
+            return completed[np.argmin(results)]
         else:
-            return self.trials[np.argmax(results)]
+            return completed[np.argmax(results)]
 
 
 def expected_improvement(X, gp, f_best):
@@ -112,6 +117,10 @@ class Trial:
     def __init__(self, parameters, trial_type="random"):
         self.parameters = parameters
         self.type = trial_type
+        self.skipped = False
 
     def update(self, result):
         self.result = result
+
+    def skip(self):
+        self.skipped = True

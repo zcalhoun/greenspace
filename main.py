@@ -21,6 +21,7 @@ import gpytorch
 from torch.utils.data import TensorDataset, DataLoader, Subset
 from gpytorch.likelihoods import GaussianLikelihood
 from gpytorch.mlls import VariationalELBO
+from linear_operator.utils.errors import NotPSDError
 
 sys.path.append("./src")
 from dataloader_v2 import GreenspaceDataset
@@ -91,9 +92,27 @@ def main(args):
         X_norm, X_mean, X_std = normalize(X)
         sub_ds = TensorDataset(coords, X_norm, y)
         sub_loader = DataLoader(sub_ds, batch_size=args.batch_size, shuffle=True)
-        mll_tensor, model, likelihood = train_model(
-            gs, sub_loader, l2_penalty, lengthscale, args
-        )
+        try:
+            mll_tensor, model, likelihood = _train_with_retry(
+                gs, sub_loader, l2_penalty, lengthscale, args
+            )
+        except NotPSDError:
+            logger.warn(f"BO iter {bo_iter}: Cholesky failed on all retries, skipping trial.")
+            trial.skip()
+            trial_artifacts.append(None)
+            save_result(
+                {
+                    "bo_iter": bo_iter,
+                    "trial_type": trial.type,
+                    "mll": None,
+                    "l2_penalty": float(l2_penalty),
+                    "lengthscale": float(lengthscale),
+                    "skipped": True,
+                },
+                output_dir,
+            )
+            continue
+
         mll_scalar = mll_tensor.item()
         trial.update(mll_scalar)
 
@@ -192,7 +211,7 @@ def main(args):
     X_all_norm, X_all_mean, X_all_std = normalize(X_all)
     all_ds = TensorDataset(coords_all, X_all_norm, y_all)
     all_loader = DataLoader(all_ds, batch_size=args.batch_size, shuffle=True)
-    _, final_model, final_likelihood = train_model(
+    _, final_model, final_likelihood = _train_with_retry(
         gs, all_loader, best_artifact["l2_penalty"], best_artifact["lengthscale"], args
     )
 
@@ -422,6 +441,21 @@ def _farthest_point_sample(coords, residuals, k):
         selected.append(min_dists.argmax().item())
 
     return coords[torch.tensor(selected)]
+
+
+def _train_with_retry(gs, loader, l2_penalty, lengthscale, args, max_retries=3):
+    jitter_levels = [1e-6, 1e-3, 1e-2]
+    for attempt, jitter in enumerate(jitter_levels[:max_retries]):
+        try:
+            with gpytorch.settings.cholesky_jitter(jitter):
+                return train_model(gs, loader, l2_penalty, lengthscale, args)
+        except NotPSDError:
+            if attempt < max_retries - 1:
+                logger.warn(
+                    f"Cholesky failed (jitter={jitter:.0e}), retrying with larger jitter…"
+                )
+            else:
+                raise
 
 
 def predict_raster(
