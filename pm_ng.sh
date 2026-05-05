@@ -1,12 +1,12 @@
 #!/bin/bash
 
 #SBATCH --job-name=pm_ng
-#SBATCH --array=0-21
+#SBATCH --array=1,10,11,15,20
 #SBATCH --mail-user=zachary.calhoun@duke.edu
 #SBATCH --mail-type=BEGIN,END,FAIL
-#SBATCH -p scavenger-gpu
+#SBATCH -p carlsonlab-gpu
 #SBATCH --gres=gpu:1
-#SBATCH --mem=8G
+#SBATCH --mem=32G
 #SBATCH --output=./pm_ng/%a.txt
 #SBATCH --error=./pm_ng/%a.err
 
