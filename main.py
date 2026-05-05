@@ -274,14 +274,17 @@ def train_model(gs, train_loader, l2_penalty, lengthscale, args):
         variational_mean
     )
 
-    # Likelihood noise: pre-training MSE is a direct estimate of unexplained variance
+    # Likelihood noise: pre-training MSE is a direct estimate of unexplained variance.
+    # GPyTorch stores noise as variance, so assign MSE directly (not sqrt).
     pretrain_mse = (all_residuals**2).mean()
     logger.info(f"Pre-train MSE {pretrain_mse}")
-    likelihood.noise_covar.noise = torch.sqrt(pretrain_mse.clamp(min=1e-4)).to(device)
+    likelihood.noise_covar.noise = pretrain_mse.clamp(min=1e-4).to(device)
 
+    # ScaleKernel uses .outputscale; LinearKernel uses .variance — they are different
+    # GPyTorch attributes and must be set separately.
     residual_var = all_residuals.var()
-    for kernel in model.gp_layer.covar_module.kernels:
-        kernel.outputscale = residual_var.clamp(min=1e-4).to(device)
+    model.gp_layer.covar_module.kernels[0].outputscale = residual_var.clamp(min=1e-4).to(device)
+    model.gp_layer.covar_module.kernels[1].variance = (residual_var * 0.1).clamp(min=1e-4).to(device)
 
     logger.info(
         f"GP init — noise: {pretrain_mse.item():.4f}, "
