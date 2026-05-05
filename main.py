@@ -82,7 +82,7 @@ def main(args):
         trial = bayes_opt.get_next_trial()
         l2_penalty = trial.parameters["l2_penalty"]
         lengthscale = trial.parameters["lengthscale"]
-        logger.info(f"BO - {trial.type} - l2: {l2_penalty} - ls: {lengthscale}")
+        logger.info(f"BO - {trial.type} - l2: {l2_penalty:.2f} - ls: {lengthscale:.5f}")
 
         # Precompute full-raster features (FFT conv), then point-lookup per sample.
         coords, X, y = extract_features(gs, train_idx, lengthscale)
@@ -211,9 +211,7 @@ def main(args):
     }
 
     logger.info("Generating full-raster temperature prediction …")
-    predict_raster(
-        gs, final_model, final_likelihood, final_artifact, output_dir, args
-    )
+    predict_raster(gs, final_model, final_likelihood, final_artifact, output_dir, args)
 
 
 def normalize(X):
@@ -423,7 +421,9 @@ def _farthest_point_sample(coords, residuals, k):
     return coords[torch.tensor(selected)]
 
 
-def predict_raster(gs, model, likelihood, best_artifact, output_dir, args, tile_rows=256):
+def predict_raster(
+    gs, model, likelihood, best_artifact, output_dir, args, tile_rows=256
+):
     """
     Tile the NLCD raster and predict temperature at every pixel.
 

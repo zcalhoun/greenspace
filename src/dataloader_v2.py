@@ -349,9 +349,22 @@ class GreenspaceDataset(Dataset):
             elevations = list(src.sample(coords, 1))
 
         # Normalize elevation; store stats so get_raster_tile() uses the same scale.
-        elevations = np.stack(elevations).ravel()
-        self.elev_min = float(elevations.min())
-        self.elev_max = float(elevations.max())
+        elevations = np.stack(elevations).ravel().astype(np.float32)
+        # Replace nodata: rasterio returns the raster's nodata value for out-of-bounds
+        # pixels; it may be a large sentinel (e.g. -9999) or NaN.  Replace both with
+        # NaN so nanmin/nanmax ignore them, then fill NaN points with the mean.
+        with rasterio.open(elev_file) as _src:
+            _nodata = _src.nodata
+        if _nodata is not None:
+            elevations[elevations == _nodata] = np.nan
+        valid_mask = np.isfinite(elevations)
+        if valid_mask.any():
+            self.elev_min = float(np.nanmin(elevations))
+            self.elev_max = float(np.nanmax(elevations))
+            fill = float(np.nanmean(elevations))
+        else:
+            self.elev_min, self.elev_max, fill = 0.0, 1.0, 0.0
+        elevations = np.where(valid_mask, elevations, fill)
         elevations = (elevations - self.elev_min) / max(self.elev_max - self.elev_min, 1e-8)
 
         return elevations
@@ -453,6 +466,7 @@ class GreenspaceDataset(Dataset):
             na = torch.from_numpy(
                 self.ndvi_albedo.data[:, rows, cols].T.copy()
             ).float()                                           # (N, 2)
+            na = torch.nan_to_num(na, nan=0.0)
             na = torch.clamp(na, 0.0, 1.0)
             parts.append(na)
 
@@ -513,6 +527,9 @@ class GreenspaceDataset(Dataset):
             na_data = torch.from_numpy(
                 self.ndvi_albedo.data.astype(np.float32).copy()
             )                                                    # (2, H, W)
+            # Replace nodata (NaN or out-of-range) with 0 before FFT.
+            # A single NaN pixel would poison the entire frequency domain.
+            na_data = torch.nan_to_num(na_data, nan=0.0)
             na_data = torch.clamp(na_data, 0.0, 1.0)
             na_weighted = _fft_convolve(na_data, kernel)        # (2, H, W)
             self._weighted_rasters.append((self.ndvi_albedo, na_weighted, 1))
@@ -645,6 +662,7 @@ class GreenspaceDataset(Dataset):
             na = torch.from_numpy(
                 self.ndvi_albedo.data[:, r_na, c_na].T.copy()
             ).float()
+            na = torch.nan_to_num(na, nan=0.0)
             na = torch.clamp(na, 0.0, 1.0)
             point_parts.append(na)
 

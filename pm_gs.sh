@@ -22,4 +22,5 @@ python main.py \
     --window-size 500 \
     --bayes-opt-iters 50 \
     --greenspace \
-    --gs-downsample 10
+    --gs-downsample 5 \
+    --num-inducing-points 100
