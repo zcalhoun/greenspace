@@ -18,7 +18,7 @@ from sklearn.gaussian_process import GaussianProcessRegressor, kernels
 
 import torch
 import gpytorch
-from torch.utils.data import TensorDataset, DataLoader, Subset
+from torch.utils.data import TensorDataset, DataLoader
 from gpytorch.likelihoods import GaussianLikelihood
 from gpytorch.mlls import VariationalELBO
 from linear_operator.utils.errors import NotPSDError
@@ -72,28 +72,29 @@ def main(args):
     ######
     # Initialize the training set up.
     ######
-    bo_variables = {"lengthscale": (50.0, 500.0)}
+    bo_variables = {
+        "l2_penalty": (args.l2_min, args.l2_max),
+        "lengthscale": (50.0, 500.0),
+    }
 
     bayes_opt = BayesianOptimization(bo_variables, random_inits=10)
 
-    train_dataset = Subset(gs, train_idx)
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     trial_artifacts = []
     for bo_iter in range(args.bayes_opt_iters):
         trial = bayes_opt.get_next_trial()
-        l2_penalty = args.l2_penalty
+        l2_penalty = trial.parameters["l2_penalty"]
         lengthscale = trial.parameters["lengthscale"]
-        logger.info(f"BO - {trial.type} ls: {lengthscale:.5f}")
+        logger.info(
+            f"BO iter {bo_iter} - {trial.type} | ls: {lengthscale:.2f}, l2: {l2_penalty:.4f}"
+        )
 
-        # Precompute full-raster features (FFT conv), then point-lookup per sample.
+        # Train on the training split.
         coords, X, y = extract_features(gs, train_idx, lengthscale)
-
-        # Normalize X
-        X_norm, X_mean, X_std = normalize(X)
-        sub_ds = TensorDataset(coords, X_norm, y)
+        sub_ds = TensorDataset(coords, X, y)
         sub_loader = DataLoader(sub_ds, batch_size=args.batch_size, shuffle=True)
         try:
-            mll_tensor, model, likelihood = _train_with_retry(
+            _, model, likelihood = _train_with_retry(
                 gs, sub_loader, l2_penalty, lengthscale, args
             )
         except NotPSDError:
@@ -106,7 +107,7 @@ def main(args):
                 {
                     "bo_iter": bo_iter,
                     "trial_type": trial.type,
-                    "mll": None,
+                    "test_mse": None,
                     "l2_penalty": float(l2_penalty),
                     "lengthscale": float(lengthscale),
                     "skipped": True,
@@ -115,22 +116,42 @@ def main(args):
             )
             continue
 
-        mll_scalar = mll_tensor.item()
-        trial.update(mll_scalar)
-
-        logger.info(f"MLL: {mll_scalar:.2f}")
-        logger.info(f"Noise: {likelihood.noise.detach().item():.2f}")
-        logger.info(
-            f"Model ls {model.gp_layer.covar_module.kernels[0].base_kernel.lengthscale.detach().item():.2f}"
+        # Evaluate on the held-out test split — this is the BO objective.
+        # test_idx shares the same lengthscale precomputation as train_idx above.
+        test_coords, test_X, test_y = extract_features(gs, test_idx, lengthscale)
+        test_loader_bo = DataLoader(
+            TensorDataset(test_coords, test_X, test_y),
+            batch_size=args.batch_size,
+            shuffle=False,
         )
+        model.eval()
+        likelihood.eval()
+        bo_preds = []
+        with torch.no_grad():
+            for c, Xb, _ in test_loader_bo:
+                bo_preds.append(model(c.to(device), Xb.to(device)).mean.cpu())
+        bo_preds = torch.cat(bo_preds)
+        test_mse = ((bo_preds - test_y) ** 2).mean().item()
+        ss_tot = ((test_y - test_y.mean()) ** 2).sum().item()
+        test_r2 = (
+            (1 - ((bo_preds - test_y) ** 2).sum().item() / ss_tot)
+            if ss_tot > 0
+            else float("nan")
+        )
+
+        trial.update(test_mse)
+
+        logger.info(f"Test MSE: {test_mse:.4f}, Test R²: {test_r2:.4f}")
+        logger.info(f"Noise: {likelihood.noise.detach().item():.4f}")
 
         trial_artifacts.append(
             {
-                "mll": mll_scalar,
+                "test_mse": test_mse,
+                "test_r2": test_r2,
                 "l2_penalty": float(l2_penalty),
                 "lengthscale": float(lengthscale),
-                "X_mean": X_mean,
-                "X_std": X_std,
+                "X_mean": torch.zeros(X.shape[1]),
+                "X_std": torch.ones(X.shape[1]),
                 "model": model,
                 "likelihood": likelihood,
             }
@@ -139,7 +160,8 @@ def main(args):
             {
                 "bo_iter": bo_iter,
                 "trial_type": trial.type,
-                "mll": mll_scalar,
+                "test_mse": test_mse,
+                "test_r2": test_r2,
                 "l2_penalty": float(l2_penalty),
                 "lengthscale": float(lengthscale),
             },
@@ -157,39 +179,12 @@ def main(args):
         best_likelihood.state_dict(), os.path.join(output_dir, "final_likelihood.pth")
     )
 
-    # Evaluate on held-out test set using the best trial's feature transform and normalization
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    test_coords, test_X, test_y = extract_features(
-        gs, test_idx, best_artifact["lengthscale"]
-    )
-    test_X_norm = (test_X - best_artifact["X_mean"]) / (best_artifact["X_std"] + 1e-8)
-    test_ds = TensorDataset(test_coords, test_X_norm, test_y)
-    test_loader_norm = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
-
-    best_model.eval()
-    best_likelihood.eval()
-    all_preds = []
-    with torch.no_grad():
-        for c, X_batch, _ in test_loader_norm:
-            c, X_batch = c.to(device), X_batch.to(device)
-            all_preds.append(best_model(c, X_batch).mean.cpu())
-
-    preds = torch.cat(all_preds)
-    test_mse = ((preds - test_y) ** 2).mean().item()
-    ss_tot = ((test_y - test_y.mean()) ** 2).sum().item()
-    test_r2 = (
-        (1 - ((preds - test_y) ** 2).sum().item() / ss_tot)
-        if ss_tot > 0
-        else float("nan")
-    )
-
     final_result = {
         "best_bo_iter": best_idx,
-        "best_mll": best_artifact["mll"],
         "best_l2_penalty": best_artifact["l2_penalty"],
         "best_lengthscale": best_artifact["lengthscale"],
-        "test_mse": test_mse,
-        "test_r2": test_r2,
+        "best_test_mse": best_artifact["test_mse"],
+        "best_test_r2": best_artifact["test_r2"],
         "X_mean": best_artifact["X_mean"].tolist(),
         "X_std": best_artifact["X_std"].tolist(),
     }
@@ -198,9 +193,9 @@ def main(args):
 
     logger.info(
         f"Best trial (iter {best_idx}): l2={best_artifact['l2_penalty']:.4f}, "
-        f"ls={best_artifact['lengthscale']:.1f}, MLL={best_artifact['mll']:.4f}"
+        f"ls={best_artifact['lengthscale']:.1f}, "
+        f"Test MSE={best_artifact['test_mse']:.4f}, Test R²={best_artifact['test_r2']:.4f}"
     )
-    logger.info(f"Test MSE: {test_mse:.4f}, Test R²: {test_r2:.4f}")
 
     # Refit on all data (train + test) using the best hyperparameters.
     # The test metrics above are an honest estimate of generalisation error;
@@ -210,8 +205,7 @@ def main(args):
     coords_all, X_all, y_all = extract_features(
         gs, all_idx, best_artifact["lengthscale"]
     )
-    X_all_norm, X_all_mean, X_all_std = normalize(X_all)
-    all_ds = TensorDataset(coords_all, X_all_norm, y_all)
+    all_ds = TensorDataset(coords_all, X_all, y_all)
     all_loader = DataLoader(all_ds, batch_size=args.batch_size, shuffle=True)
     _, final_model, final_likelihood = _train_with_retry(
         gs, all_loader, best_artifact["l2_penalty"], best_artifact["lengthscale"], args
@@ -224,21 +218,8 @@ def main(args):
         os.path.join(output_dir, "final_likelihood.pth"),
     )
 
-    # Build an artifact for predict_raster that reflects the full-data normalisation.
-    final_artifact = {
-        **best_artifact,
-        "X_mean": X_all_mean,
-        "X_std": X_all_std,
-    }
-
     logger.info("Generating full-raster temperature prediction …")
-    predict_raster(gs, final_model, final_likelihood, final_artifact, output_dir, args)
-
-
-def normalize(X):
-    mu = X.mean(axis=0)
-    std = X.std(axis=0)
-    return (X - mu) / (std + 1e-8), mu, std
+    predict_raster(gs, final_model, final_likelihood, best_artifact, output_dir, args)
 
 
 def train_model(gs, train_loader, l2_penalty, lengthscale, args):
@@ -650,10 +631,16 @@ if __name__ == "__main__":
         help="Number of GP inducing points for the final model.",
     )
     parser.add_argument(
-        "--l2-penalty",
+        "--l2-min",
         type=float,
-        default=1.0,
-        help="L2 penalty for the ridge regression initialization.",
+        default=0.0001,
+        help="Lower bound of the L2 penalty search range for Bayesian optimization.",
+    )
+    parser.add_argument(
+        "--l2-max",
+        type=float,
+        default=0.1,
+        help="Upper bound of the L2 penalty search range for Bayesian optimization.",
     )
     arguments = parser.parse_args()
     main(arguments)
