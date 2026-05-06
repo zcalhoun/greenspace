@@ -83,20 +83,18 @@ def _fft_filter_exp(
 
     raster_padded = torch.zeros(C, pad_H, pad_W)
     raster_padded[:, :H, :W] = feature_raster
-    X_fft = torch.fft.rfft2(raster_padded)            # (C, pad_H, pad_W//2+1)
+    X_fft = torch.fft.rfft2(raster_padded)  # (C, pad_H, pad_W//2+1)
 
     # Frequency grid in cycles / metre.
-    fy = torch.fft.fftfreq(pad_H, d=pixel_size_m)     # (pad_H,)
-    fx = torch.fft.rfftfreq(pad_W, d=pixel_size_m)    # (pad_W//2+1,)
+    fy = torch.fft.fftfreq(pad_H, d=pixel_size_m)  # (pad_H,)
+    fx = torch.fft.rfftfreq(pad_W, d=pixel_size_m)  # (pad_W//2+1,)
     fy, fx = torch.meshgrid(fy, fx, indexing="ij")
-    k_sq = fy ** 2 + fx ** 2                           # (pad_H, pad_W//2+1)
+    k_sq = fy**2 + fx**2  # (pad_H, pad_W//2+1)
 
     alpha = 1.0 / lengthscale
-    H_filt = (alpha ** 3) / (alpha ** 2 + (2 * math.pi) ** 2 * k_sq) ** 1.5
+    H_filt = (alpha**3) / (alpha**2 + (2 * math.pi) ** 2 * k_sq) ** 1.5
 
-    result = torch.fft.irfft2(
-        X_fft * H_filt.unsqueeze(0), s=(pad_H, pad_W)
-    )
+    result = torch.fft.irfft2(X_fft * H_filt.unsqueeze(0), s=(pad_H, pad_W))
     return result[:, :H, :W].contiguous()
 
 
@@ -139,9 +137,9 @@ def _one_hot_pool_raster(
     for r_in in range(0, H_trim, in_strip):
         r_in_end = min(r_in + in_strip, H_trim)
         strip = torch.from_numpy(data[r_in:r_in_end, :W_trim].copy()).long()
-        indices = lut[strip.clamp(0, lut.size(0) - 1)]         # (strip_H, W_trim)
+        indices = lut[strip.clamp(0, lut.size(0) - 1)]  # (strip_H, W_trim)
         oh = F.one_hot(indices, num_classes=num_classes + 1).float()
-        oh = oh[..., :num_classes].permute(2, 0, 1)            # (C, strip_H, W_trim)
+        oh = oh[..., :num_classes].permute(2, 0, 1)  # (C, strip_H, W_trim)
         if pool_factor > 1:
             oh = F.avg_pool2d(
                 oh.unsqueeze(0), kernel_size=pool_factor, stride=pool_factor
@@ -208,7 +206,7 @@ class GreenspaceDataset(Dataset):
 
         self.data_dir = data_dir
         self.greenspace = greenspace
-        self.window_size_m = window_size      # spatial extent in metres
+        self.window_size_m = window_size  # spatial extent in metres
         self.return_greenspace = greenspace
         self.return_ndvi_albedo = ndvi_albedo
         self.non_negative = non_negative
@@ -307,7 +305,7 @@ class GreenspaceDataset(Dataset):
 
     def _extract_elevation(self, gdf):
         elev_file = os.path.join(self.data_dir, "elevation.tif")
-        self.elev_path = elev_file   # stored for full-raster prediction
+        self.elev_path = elev_file  # stored for full-raster prediction
         with rasterio.open(elev_file) as src:
             # Reproject points to raster CRS if needed
             if gdf.crs != src.crs:
@@ -340,7 +338,9 @@ class GreenspaceDataset(Dataset):
         else:
             self.elev_min, self.elev_max, fill = 0.0, 1.0, 0.0
         elevations = np.where(valid_mask, elevations, fill)
-        elevations = (elevations - self.elev_min) / max(self.elev_max - self.elev_min, 1e-8)
+        elevations = (elevations - self.elev_min) / max(
+            self.elev_max - self.elev_min, 1e-8
+        )
 
         return elevations
 
@@ -421,7 +421,7 @@ class GreenspaceDataset(Dataset):
         raw = torch.from_numpy(self.nlcd.data[rows, cols].copy()).long()
         idx = self._NLCD_LUT[raw.clamp(0, self._NLCD_LUT.size(0) - 1)]
         nlcd_oh = F.one_hot(idx, num_classes=len(self._NLCD_CLASSES) + 1).float()
-        parts.append(nlcd_oh[:, : len(self._NLCD_CLASSES)])   # (N, 20)
+        parts.append(nlcd_oh[:, : len(self._NLCD_CLASSES)])  # (N, 20)
 
         if self.return_greenspace:
             rows = self.greenspace.coords[:, 0]
@@ -429,7 +429,7 @@ class GreenspaceDataset(Dataset):
             raw = torch.from_numpy(self.greenspace.data[rows, cols].copy()).long()
             idx = self._GS_LUT[raw.clamp(0, self._GS_LUT.size(0) - 1)]
             gs_oh = F.one_hot(idx, num_classes=len(self._GREEN_CLASSES) + 1).float()
-            gs_oh = gs_oh[:, : len(self._GREEN_CLASSES)]       # (N, 9)
+            gs_oh = gs_oh[:, : len(self._GREEN_CLASSES)]  # (N, 9)
             if self.non_negative:
                 gs_oh = -gs_oh
             parts.append(gs_oh)
@@ -440,12 +440,12 @@ class GreenspaceDataset(Dataset):
             # ndvi_albedo.data is (2, H, W)
             na = torch.from_numpy(
                 self.ndvi_albedo.data[:, rows, cols].T.copy()
-            ).float()                                           # (N, 2)
+            ).float()  # (N, 2)
             na = torch.nan_to_num(na, nan=0.0)
             na = torch.clamp(na, 0.0, 1.0)
             parts.append(na)
 
-        self._point_features = torch.cat(parts, dim=1)         # (N, sum(num_dims))
+        self._point_features = torch.cat(parts, dim=1)  # (N, sum(num_dims))
 
     def precompute_features(self, lengthscale: float):
         """
@@ -461,17 +461,22 @@ class GreenspaceDataset(Dataset):
         if getattr(self, "_precomputed_lengthscale", None) == lengthscale:
             return
 
-        print(f"[GreenspaceDataset] Precomputing feature rasters "
-              f"(lengthscale={lengthscale:.1f} m) …", flush=True)
+        print(
+            f"[GreenspaceDataset] Precomputing feature rasters "
+            f"(lengthscale={lengthscale:.1f} m) …",
+            flush=True,
+        )
 
-        self._weighted_rasters = []   # list of (raster_obj, tensor (C,H,W), pool_factor)
+        self._weighted_rasters = []  # list of (raster_obj, tensor (C,H,W), pool_factor)
 
         # --- NLCD (30 m native, no pooling needed) ---
         nlcd_px = _pixel_size_metres(self.nlcd)
         nlcd_oh = _one_hot_pool_raster(
-            self.nlcd.data, self._NLCD_LUT, len(self._NLCD_CLASSES),
+            self.nlcd.data,
+            self._NLCD_LUT,
+            len(self._NLCD_CLASSES),
             pool_factor=1,
-        )                                                        # (20, H, W)
+        )  # (20, H, W)
         nlcd_weighted = _fft_filter_exp(nlcd_oh, nlcd_px, lengthscale)
         self._weighted_rasters.append((self.nlcd, nlcd_weighted, 1))
 
@@ -480,9 +485,11 @@ class GreenspaceDataset(Dataset):
             gs_native_px = _pixel_size_metres(self.greenspace)
             gs_pooled_px = gs_native_px * self.gs_downsample
             gs_oh = _one_hot_pool_raster(
-                self.greenspace.data, self._GS_LUT, len(self._GREEN_CLASSES),
+                self.greenspace.data,
+                self._GS_LUT,
+                len(self._GREEN_CLASSES),
                 pool_factor=self.gs_downsample,
-            )                                                    # (9, H', W')
+            )  # (9, H', W')
             if self.non_negative:
                 gs_oh = -gs_oh
             gs_weighted = _fft_filter_exp(gs_oh, gs_pooled_px, lengthscale)
@@ -495,7 +502,7 @@ class GreenspaceDataset(Dataset):
             na_px = _pixel_size_metres(self.ndvi_albedo)
             na_data = torch.from_numpy(
                 self.ndvi_albedo.data.astype(np.float32).copy()
-            )                                                    # (2, H, W)
+            )  # (2, H, W)
             # Replace nodata (NaN or out-of-range) with 0 before FFT.
             # A single NaN pixel would poison the entire frequency domain.
             na_data = torch.nan_to_num(na_data, nan=0.0)
@@ -517,9 +524,9 @@ class GreenspaceDataset(Dataset):
             X:      (N, sum(num_dims)*2 + 1) float tensor
             y:      (N,) float tensor of temperatures
         """
-        assert hasattr(self, "_weighted_rasters"), (
-            "Call precompute_features(lengthscale) before get_all_features()."
-        )
+        assert hasattr(
+            self, "_weighted_rasters"
+        ), "Call precompute_features(lengthscale) before get_all_features()."
 
         weighted_parts = []
         for raster_obj, feat_raster, pool_factor in self._weighted_rasters:
@@ -530,10 +537,10 @@ class GreenspaceDataset(Dataset):
             cols = np.clip(cols, 0, W - 1)
             weighted_parts.append(feat_raster[:, rows, cols].T)  # (N, C)
 
-        point_feats = self._point_features[indices]              # (N, sum(num_dims))
-        elev = torch.tensor(
-            self.elevation[indices], dtype=torch.float32
-        ).unsqueeze(1)                                           # (N, 1)
+        point_feats = self._point_features[indices]  # (N, sum(num_dims))
+        elev = torch.tensor(self.elevation[indices], dtype=torch.float32).unsqueeze(
+            1
+        )  # (N, 1)
 
         X = torch.cat([*weighted_parts, point_feats, elev], dim=1)
         coords = torch.tensor(self.coords[indices], dtype=torch.float32)
@@ -559,13 +566,13 @@ class GreenspaceDataset(Dataset):
                     where N = (row_end - row_start) * W
             X:      (N, D) float32 feature tensor
         """
-        assert hasattr(self, "_weighted_rasters"), (
-            "Call precompute_features(lengthscale) before get_raster_tile()."
-        )
+        assert hasattr(
+            self, "_weighted_rasters"
+        ), "Call precompute_features(lengthscale) before get_raster_tile()."
 
         H, W = self.nlcd.data.shape
         rows_arr = np.repeat(np.arange(row_start, row_end), W)  # (N,)
-        cols_arr = np.tile(np.arange(W), row_end - row_start)   # (N,)
+        cols_arr = np.tile(np.arange(W), row_end - row_start)  # (N,)
 
         # Convert NLCD pixel centres to NLCD CRS map coordinates once.
         nlcd_aff = AffineTransformer(self.nlcd.transform)
@@ -598,7 +605,7 @@ class GreenspaceDataset(Dataset):
                 r_raw, c_raw = _to_raster_rowcol(raster_obj)
                 r = np.clip(r_raw // pool_factor, 0, fH - 1)
                 c = np.clip(c_raw // pool_factor, 0, fW - 1)
-            weighted_parts.append(feat_raster[:, r, c].T)   # (N, C)
+            weighted_parts.append(feat_raster[:, r, c].T)  # (N, C)
 
         # --- Point features (one-hot at each pixel centre) ---
         point_parts = []
@@ -612,13 +619,9 @@ class GreenspaceDataset(Dataset):
             r_gs, c_gs = _to_raster_rowcol(self.greenspace)
             r_gs = np.clip(r_gs, 0, self.greenspace.data.shape[0] - 1)
             c_gs = np.clip(c_gs, 0, self.greenspace.data.shape[1] - 1)
-            raw_gs = torch.from_numpy(
-                self.greenspace.data[r_gs, c_gs].copy()
-            ).long()
+            raw_gs = torch.from_numpy(self.greenspace.data[r_gs, c_gs].copy()).long()
             idx_gs = self._GS_LUT[raw_gs.clamp(0, self._GS_LUT.size(0) - 1)]
-            gs_oh = F.one_hot(
-                idx_gs, num_classes=len(self._GREEN_CLASSES) + 1
-            ).float()
+            gs_oh = F.one_hot(idx_gs, num_classes=len(self._GREEN_CLASSES) + 1).float()
             gs_oh = gs_oh[:, : len(self._GREEN_CLASSES)]
             if self.non_negative:
                 gs_oh = -gs_oh
@@ -628,9 +631,7 @@ class GreenspaceDataset(Dataset):
             r_na, c_na = _to_raster_rowcol(self.ndvi_albedo)
             r_na = np.clip(r_na, 0, self.ndvi_albedo.data.shape[1] - 1)
             c_na = np.clip(c_na, 0, self.ndvi_albedo.data.shape[2] - 1)
-            na = torch.from_numpy(
-                self.ndvi_albedo.data[:, r_na, c_na].T.copy()
-            ).float()
+            na = torch.from_numpy(self.ndvi_albedo.data[:, r_na, c_na].T.copy()).float()
             na = torch.nan_to_num(na, nan=0.0)
             na = torch.clamp(na, 0.0, 1.0)
             point_parts.append(na)
@@ -644,9 +645,7 @@ class GreenspaceDataset(Dataset):
                 x_e, y_e = to_elev.transform(x_nlcd, y_nlcd)
             else:
                 x_e, y_e = x_nlcd, y_nlcd
-            elev_vals = np.array(
-                list(elev_src.sample(zip(x_e, y_e), 1))
-            ).ravel()
+            elev_vals = np.array(list(elev_src.sample(zip(x_e, y_e), 1))).ravel()
         elev_norm = (elev_vals - self.elev_min) / max(
             self.elev_max - self.elev_min, 1e-8
         )
@@ -657,13 +656,9 @@ class GreenspaceDataset(Dataset):
         if self.nlcd.crs.to_epsg() == 5070:
             x_5070, y_5070 = x_nlcd, y_nlcd
         else:
-            to_5070 = Transformer.from_crs(
-                self.nlcd.crs, "EPSG:5070", always_xy=True
-            )
+            to_5070 = Transformer.from_crs(self.nlcd.crs, "EPSG:5070", always_xy=True)
             x_5070, y_5070 = to_5070.transform(x_nlcd, y_nlcd)
-        coords_km = (
-            np.column_stack([x_5070, y_5070]) - self.coords_mean
-        ) / 1000.0
+        coords_km = (np.column_stack([x_5070, y_5070]) - self.coords_mean) / 1000.0
         coords_t = torch.tensor(coords_km, dtype=torch.float32)
 
         X = torch.cat([*weighted_parts, *point_parts, elev_t], dim=1)
@@ -688,7 +683,7 @@ class CausalGreenspaceDataset(GreenspaceDataset):
         90,
         95,
     ]
-    _GREEN_CLASSES = [0, 2, 4, 6, 8, 10, 12, 13, 14]
+    _GREEN_CLASSES = [2, 4, 6, 8, 10, 12, 13, 14]
     _NLCD_LUT = torch.full(
         (max(_NLCD_CLASSES) + 2,), len(_NLCD_CLASSES), dtype=torch.long
     )
@@ -709,6 +704,7 @@ class CausalGreenspaceDataset(GreenspaceDataset):
         window_size=500,  # Distance in meters.
         ndvi_albedo=False,
         non_negative=False,
+        gs_downsample=1,
     ):
         super().__init__(
             data_dir,
@@ -716,6 +712,7 @@ class CausalGreenspaceDataset(GreenspaceDataset):
             time=time,
             window_size=window_size,
             ndvi_albedo=ndvi_albedo,
+            gs_downsample=gs_downsample,
         )
 
 
