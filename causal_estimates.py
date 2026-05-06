@@ -393,7 +393,7 @@ def main(args):
 
     all_idx = np.arange(len(gs))
     coords, X, y = extract_features(gs, all_idx, best_ls)
-    pdb.set_trace()
+    # pdb.set_trace()
     # All features are already in [0, 1] (GS/NLCD proportions, one-hot, and
     # elevation min-max scaled by the dataloader). No further normalization needed.
     ds = TensorDataset(coords, X, y)
