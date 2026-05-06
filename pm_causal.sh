@@ -23,4 +23,4 @@ python causal_estimates.py \
     --gs-downsample 10 \
     --num-inducing-points 100 \
     --lengthscale 200 \
-    --l2-penalty 0.1
+    --l2-penalty 0.001
