@@ -15,11 +15,12 @@ conda activate svgp
 
 python causal_estimates.py \
     --data-dir /hpc/group/carlsonlab/zdc6/greenspace/data/traversals/ \
-    --output-dir /work/zdc6/greenspace/results/pm_causal/ \
+    --output-dir /work/zdc6/greenspace/results/pm_causal_l2_1e-1/ \
     --epochs 100 \
     --lr 0.01 \
     --batch-size 128 \
     --window-size 500 \
     --gs-downsample 10 \
     --num-inducing-points 100 \
-    --lengthscale 200
+    --lengthscale 200 \
+    --l2-penalty 0.1
