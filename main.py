@@ -72,7 +72,7 @@ def main(args):
     ######
     # Initialize the training set up.
     ######
-    bo_variables = {"l2_penalty": (0.001, 1.0), "lengthscale": (50.0, 1000.0)}
+    bo_variables = {"lengthscale": (50.0, 500.0)}
 
     bayes_opt = BayesianOptimization(bo_variables, random_inits=10)
 
@@ -81,9 +81,9 @@ def main(args):
     trial_artifacts = []
     for bo_iter in range(args.bayes_opt_iters):
         trial = bayes_opt.get_next_trial()
-        l2_penalty = trial.parameters["l2_penalty"]
+        l2_penalty = args.l2_penalty
         lengthscale = trial.parameters["lengthscale"]
-        logger.info(f"BO - {trial.type} - l2: {l2_penalty:.2f} - ls: {lengthscale:.5f}")
+        logger.info(f"BO - {trial.type} ls: {lengthscale:.5f}")
 
         # Precompute full-raster features (FFT conv), then point-lookup per sample.
         coords, X, y = extract_features(gs, train_idx, lengthscale)
@@ -97,7 +97,9 @@ def main(args):
                 gs, sub_loader, l2_penalty, lengthscale, args
             )
         except NotPSDError:
-            logger.warn(f"BO iter {bo_iter}: Cholesky failed on all retries, skipping trial.")
+            logger.warn(
+                f"BO iter {bo_iter}: Cholesky failed on all retries, skipping trial."
+            )
             trial.skip()
             trial_artifacts.append(None)
             save_result(
@@ -275,7 +277,6 @@ def train_model(gs, train_loader, l2_penalty, lengthscale, args):
             all_coords.append(c.cpu())
             all_residuals.append((y_batch - pred.mean).cpu())
 
-    # pdb.set_trace()
     all_coords = torch.cat(all_coords, dim=0)  # (N, 2)
     all_residuals = torch.cat(all_residuals, dim=0)  # (N,) signed
 
@@ -302,8 +303,12 @@ def train_model(gs, train_loader, l2_penalty, lengthscale, args):
     # ScaleKernel uses .outputscale; LinearKernel uses .variance — they are different
     # GPyTorch attributes and must be set separately.
     residual_var = all_residuals.var()
-    model.gp_layer.covar_module.kernels[0].outputscale = residual_var.clamp(min=1e-4).to(device)
-    model.gp_layer.covar_module.kernels[1].variance = (residual_var * 0.1).clamp(min=1e-4).to(device)
+    model.gp_layer.covar_module.kernels[0].outputscale = residual_var.clamp(
+        min=1e-4
+    ).to(device)
+    model.gp_layer.covar_module.kernels[1].variance = (
+        (residual_var * 0.1).clamp(min=1e-4).to(device)
+    )
 
     logger.info(
         f"GP init — noise: {pretrain_mse.item():.4f}, "
@@ -643,6 +648,12 @@ if __name__ == "__main__":
         type=int,
         default=10,
         help="Number of GP inducing points for the final model.",
+    )
+    parser.add_argument(
+        "--l2-penalty",
+        type=float,
+        default=1.0,
+        help="L2 penalty for the ridge regression initialization.",
     )
     arguments = parser.parse_args()
     main(arguments)

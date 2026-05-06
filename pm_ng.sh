@@ -15,10 +15,10 @@ conda activate svgp
 
 python main.py \
     --data-dir /hpc/group/carlsonlab/zdc6/greenspace/data/traversals/ \
-    --output-dir /work/zdc6/greenspace/results/pm/ng_100ip/ \
+    --output-dir /work/zdc6/greenspace/results/pm/ng_2/ \
     --epochs 100 \
     --lr 0.01 \
     --batch-size 128 \
     --window-size 500 \
-    --bayes-opt-iters 50 \
+    --bayes-opt-iters 20 \
     --num-inducing-points 100

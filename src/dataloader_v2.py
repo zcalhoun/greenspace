@@ -5,6 +5,7 @@ should how quickly the model trains.
 
 import os
 import json
+import math
 
 import numpy as np
 import rasterio
@@ -49,80 +50,54 @@ def _next_fast_fft_size(n: int) -> int:
     return p
 
 
-def _build_exp_kernel(half_k: int, pixel_size_m: float, lengthscale: float) -> torch.Tensor:
+def _fft_filter_exp(
+    feature_raster: torch.Tensor,
+    pixel_size_m: float,
+    lengthscale: float,
+) -> torch.Tensor:
     """
-    Build a normalised 2-D exponential decay kernel.
+    Apply an isotropic exponential decay filter exp(-r/lengthscale) to every
+    channel of feature_raster using the analytical frequency-domain transfer
+    function.  No kernel truncation; exact up to floating-point precision.
 
-    Args:
-        half_k:       half-width of the kernel in pixels
-        pixel_size_m: metres per pixel (after any pooling)
-        lengthscale:  decay lengthscale in metres
-
-    Returns:
-        (2*half_k+1, 2*half_k+1) float tensor that sums to 1.
-    """
-    ys = torch.arange(-half_k, half_k + 1, dtype=torch.float32)
-    xs = torch.arange(-half_k, half_k + 1, dtype=torch.float32)
-    ys, xs = torch.meshgrid(ys, xs, indexing="ij")
-    dist_m = torch.sqrt(ys ** 2 + xs ** 2) * pixel_size_m
-    kernel = torch.exp(-dist_m / lengthscale)
-    kernel = kernel / kernel.sum()
-    return kernel
-
-
-def _fft_convolve(feature_raster: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
-    """
-    Convolve a multi-channel raster with a 2-D kernel via FFT.
-
-    The kernel is assumed to have odd spatial dimensions with its centre at
-    the middle pixel. Zero-padding is applied so the result is free of
-    circular-convolution artefacts. The output has the same spatial size as
-    the input.
+    The 2-D FT of exp(-r/λ) is (via the Hankel transform):
+        F(k) = 2π·α / (α² + (2πk)²)^(3/2),  α = 1/λ,  k in cycles/m.
+    Normalised to DC = 1:
+        H(kx, ky) = α³ / (α² + (2π)²·(kx²+ky²))^(3/2)
 
     Args:
         feature_raster: (C, H, W) float tensor
-        kernel:         (kH, kW) float tensor
+        pixel_size_m:   metres per pixel (after any pooling)
+        lengthscale:    decay lengthscale in metres
 
     Returns:
         (C, H, W) float tensor
     """
     C, H, W = feature_raster.shape
-    kH, kW = kernel.shape
-    half_kH = kH // 2
-    half_kW = kW // 2
 
-    pad_H = _next_fast_fft_size(H + kH - 1)
-    pad_W = _next_fast_fft_size(W + kW - 1)
+    # Zero-pad to suppress circular-convolution wrap-around.
+    # 3 × lengthscale captures > 95 % of the kernel weight.
+    pad_r = max(1, int(3.0 * lengthscale / pixel_size_m))
+    pad_H = _next_fast_fft_size(H + pad_r)
+    pad_W = _next_fast_fft_size(W + pad_r)
 
-    # Place kernel at top-left then roll so its centre lands at (0, 0) —
-    # this converts correlation to the circular convolution that FFT computes.
-    kernel_padded = torch.zeros(pad_H, pad_W)
-    kernel_padded[:kH, :kW] = kernel
-    kernel_padded = torch.roll(kernel_padded, shifts=(-half_kH, -half_kW), dims=(0, 1))
-    K_fft = torch.fft.rfft2(kernel_padded)           # (pad_H, pad_W//2+1)
-
-    # Batch-FFT all channels simultaneously.
     raster_padded = torch.zeros(C, pad_H, pad_W)
     raster_padded[:, :H, :W] = feature_raster
-    X_fft = torch.fft.rfft2(raster_padded)           # (C, pad_H, pad_W//2+1)
+    X_fft = torch.fft.rfft2(raster_padded)            # (C, pad_H, pad_W//2+1)
 
-    conv = torch.fft.irfft2(
-        X_fft * K_fft.unsqueeze(0), s=(pad_H, pad_W)
-    )                                                 # (C, pad_H, pad_W)
+    # Frequency grid in cycles / metre.
+    fy = torch.fft.fftfreq(pad_H, d=pixel_size_m)     # (pad_H,)
+    fx = torch.fft.rfftfreq(pad_W, d=pixel_size_m)    # (pad_W//2+1,)
+    fy, fx = torch.meshgrid(fy, fx, indexing="ij")
+    k_sq = fy ** 2 + fx ** 2                           # (pad_H, pad_W//2+1)
 
-    # Crop back to original spatial size.
-    #
-    # Rolling the kernel by (-half_kH, -half_kW) shifts the entire convolution
-    # output by the same amount:
-    #
-    #   rolled_conv[r] == unrolled_conv[r + half_k]
-    #
-    # The weighted sum for raster position i is unrolled_conv[i + half_k]
-    # = rolled_conv[i].  So the correct starting index after rolling is 0,
-    # not half_k.  Cropping at [half_k : half_k + H] would apply a second
-    # half_k shift, placing each feature ~window_size metres from its true
-    # spatial location.
-    return conv[:, :H, :W].contiguous()
+    alpha = 1.0 / lengthscale
+    H_filt = (alpha ** 3) / (alpha ** 2 + (2 * math.pi) ** 2 * k_sq) ** 1.5
+
+    result = torch.fft.irfft2(
+        X_fft * H_filt.unsqueeze(0), s=(pad_H, pad_W)
+    )
+    return result[:, :H, :W].contiguous()
 
 
 def _one_hot_pool_raster(
@@ -493,28 +468,24 @@ class GreenspaceDataset(Dataset):
 
         # --- NLCD (30 m native, no pooling needed) ---
         nlcd_px = _pixel_size_metres(self.nlcd)
-        half_k = max(1, int(self.window_size_m / nlcd_px))
-        kernel = _build_exp_kernel(half_k, nlcd_px, lengthscale)
         nlcd_oh = _one_hot_pool_raster(
             self.nlcd.data, self._NLCD_LUT, len(self._NLCD_CLASSES),
             pool_factor=1,
         )                                                        # (20, H, W)
-        nlcd_weighted = _fft_convolve(nlcd_oh, kernel)          # (20, H, W)
+        nlcd_weighted = _fft_filter_exp(nlcd_oh, nlcd_px, lengthscale)
         self._weighted_rasters.append((self.nlcd, nlcd_weighted, 1))
 
         # --- Greenspace (0.6 m native, pool by gs_downsample) ---
         if self.return_greenspace:
             gs_native_px = _pixel_size_metres(self.greenspace)
             gs_pooled_px = gs_native_px * self.gs_downsample
-            half_k = max(1, int(self.window_size_m / gs_pooled_px))
-            kernel = _build_exp_kernel(half_k, gs_pooled_px, lengthscale)
             gs_oh = _one_hot_pool_raster(
                 self.greenspace.data, self._GS_LUT, len(self._GREEN_CLASSES),
                 pool_factor=self.gs_downsample,
             )                                                    # (9, H', W')
             if self.non_negative:
                 gs_oh = -gs_oh
-            gs_weighted = _fft_convolve(gs_oh, kernel)          # (9, H', W')
+            gs_weighted = _fft_filter_exp(gs_oh, gs_pooled_px, lengthscale)
             self._weighted_rasters.append(
                 (self.greenspace, gs_weighted, self.gs_downsample)
             )
@@ -522,8 +493,6 @@ class GreenspaceDataset(Dataset):
         # --- NDVI / Albedo (10 m native, no pooling needed) ---
         if self.return_ndvi_albedo:
             na_px = _pixel_size_metres(self.ndvi_albedo)
-            half_k = max(1, int(self.window_size_m / na_px))
-            kernel = _build_exp_kernel(half_k, na_px, lengthscale)
             na_data = torch.from_numpy(
                 self.ndvi_albedo.data.astype(np.float32).copy()
             )                                                    # (2, H, W)
@@ -531,7 +500,7 @@ class GreenspaceDataset(Dataset):
             # A single NaN pixel would poison the entire frequency domain.
             na_data = torch.nan_to_num(na_data, nan=0.0)
             na_data = torch.clamp(na_data, 0.0, 1.0)
-            na_weighted = _fft_convolve(na_data, kernel)        # (2, H, W)
+            na_weighted = _fft_filter_exp(na_data, na_px, lengthscale)
             self._weighted_rasters.append((self.ndvi_albedo, na_weighted, 1))
 
         self._precomputed_lengthscale = lengthscale
