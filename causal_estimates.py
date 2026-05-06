@@ -22,12 +22,6 @@ from utils import SimpleLogger, lstsq_init
 logger = SimpleLogger()
 
 
-def normalize(X):
-    mu = X.mean(axis=0)
-    std = X.std(axis=0)
-    return (X - mu) / (std + 1e-8), mu, std
-
-
 def train_model(gs, train_loader, l2_penalty, lengthscale, args):
     num_inducing_points = args.num_inducing_points
 
@@ -182,7 +176,6 @@ def _train_with_retry(gs, loader, l2_penalty, lengthscale, args, max_retries=3):
                 raise
 
 
-
 def predict_causal_raster(gs, model, artifact, output_dir, args, tile_rows=256):
     """
     Tile the NLCD raster and write an 8-band causal effects GeoTIFF clipped to
@@ -208,8 +201,8 @@ def predict_causal_raster(gs, model, artifact, output_dir, args, tile_rows=256):
     beta = model.beta.detach().to(device)
 
     n_nlcd = len(gs._NLCD_CLASSES)  # 11
-    n_gs = len(gs._GREEN_CLASSES)   # 8
-    weighted_gs_start = n_nlcd      # 11
+    n_gs = len(gs._GREEN_CLASSES)  # 8
+    weighted_gs_start = n_nlcd  # 11
     point_gs_start = n_nlcd + n_gs + n_nlcd  # 30
 
     # Compute the NLCD row/col window that covers the greenspace extent.
@@ -218,8 +211,12 @@ def predict_causal_raster(gs, model, artifact, output_dir, args, tile_rows=256):
         gs.greenspace.crs, gs.nlcd.crs, *gs.greenspace.bounds
     )
     nlcd_aff = AffineTransformer(gs.nlcd.transform)
-    row0, col0 = nlcd_aff.rowcol(gs_bounds_in_nlcd[0], gs_bounds_in_nlcd[3])  # left, top
-    row1, col1 = nlcd_aff.rowcol(gs_bounds_in_nlcd[2], gs_bounds_in_nlcd[1])  # right, bottom
+    row0, col0 = nlcd_aff.rowcol(
+        gs_bounds_in_nlcd[0], gs_bounds_in_nlcd[3]
+    )  # left, top
+    row1, col1 = nlcd_aff.rowcol(
+        gs_bounds_in_nlcd[2], gs_bounds_in_nlcd[1]
+    )  # right, bottom
     row_min = max(0, min(row0, row1))
     row_max = min(H_full, max(row0, row1))
     col_min = max(0, min(col0, col1))
@@ -227,7 +224,9 @@ def predict_causal_raster(gs, model, artifact, output_dir, args, tile_rows=256):
     H_clip = row_max - row_min
     W_clip = col_max - col_min
 
-    n_causal_bands = n_gs  # one band per GS class; reference is implicit (no-GS = zero features)
+    n_causal_bands = (
+        n_gs  # one band per GS class; reference is implicit (no-GS = zero features)
+    )
     causal_bands = np.full((n_causal_bands, H_clip, W_clip), np.nan, dtype=np.float32)
 
     for row_start in range(row_min, row_max, tile_rows):
@@ -245,9 +244,9 @@ def predict_causal_raster(gs, model, artifact, output_dir, args, tile_rows=256):
                 pi = point_gs_start + band_idx
                 ce = X_norm[:, wi] * beta[wi] + X_norm[:, pi] * beta[pi]
                 ce_full = ce.cpu().numpy().reshape(tile_H, W_full)
-                causal_bands[band_idx, out_row:out_row + tile_H, :] = (
-                    ce_full[:, col_min:col_max]
-                )
+                causal_bands[band_idx, out_row : out_row + tile_H, :] = ce_full[
+                    :, col_min:col_max
+                ]
 
     out_path = os.path.join(output_dir, f"causal_effects_{args.time}.tif")
     clip_window = rasterio.windows.Window(col_min, row_min, W_clip, H_clip)
@@ -275,7 +274,9 @@ def predict_causal_raster(gs, model, artifact, output_dir, args, tile_rows=256):
     logger.info(f"Causal effects raster saved → {out_path}")
 
 
-def predict_temperature_raster(gs, model, likelihood, artifact, output_dir, args, tile_rows=256):
+def predict_temperature_raster(
+    gs, model, likelihood, artifact, output_dir, args, tile_rows=256
+):
     """
     Tile the NLCD raster (clipped to the greenspace extent) and write a 2-band
     predicted-temperature GeoTIFF.
@@ -316,7 +317,9 @@ def predict_temperature_raster(gs, model, likelihood, artifact, output_dir, args
     for row_start in range(row_min, row_max, tile_rows):
         row_end = min(row_start + tile_rows, row_max)
         tile_H = row_end - row_start
-        logger.info(f"Predicting temperature tile rows {row_start}–{row_end} / {row_max}")
+        logger.info(
+            f"Predicting temperature tile rows {row_start}–{row_end} / {row_max}"
+        )
 
         coords, X = gs.get_raster_tile(row_start, row_end)
         X_norm = (X.to(device) - X_mean) / (X_std + 1e-8)
@@ -328,10 +331,12 @@ def predict_temperature_raster(gs, model, likelihood, artifact, output_dir, args
             var = y_pred.variance.cpu().numpy()
 
         out_row = row_start - row_min
-        pred_mean[out_row:out_row + tile_H, :] = mu.reshape(tile_H, W_full)[:, col_min:col_max]
-        pred_std[out_row:out_row + tile_H, :] = (
-            np.sqrt(np.maximum(var, 0.0)).reshape(tile_H, W_full)[:, col_min:col_max]
-        )
+        pred_mean[out_row : out_row + tile_H, :] = mu.reshape(tile_H, W_full)[
+            :, col_min:col_max
+        ]
+        pred_std[out_row : out_row + tile_H, :] = np.sqrt(np.maximum(var, 0.0)).reshape(
+            tile_H, W_full
+        )[:, col_min:col_max]
 
     out_path = os.path.join(output_dir, f"predicted_temperature_{args.time}.tif")
     clip_window = rasterio.windows.Window(col_min, row_min, W_clip, H_clip)
@@ -388,9 +393,10 @@ def main(args):
 
     all_idx = np.arange(len(gs))
     coords, X, y = extract_features(gs, all_idx, best_ls)
-
-    X_norm, X_mean, X_std = normalize(X)
-    ds = TensorDataset(coords, X_norm, y)
+    pdb.set_trace()
+    # All features are already in [0, 1] (GS/NLCD proportions, one-hot, and
+    # elevation min-max scaled by the dataloader). No further normalization needed.
+    ds = TensorDataset(coords, X, y)
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True)
 
     logger.info("Training model on all data...")
@@ -403,8 +409,8 @@ def main(args):
 
     artifact = {
         "lengthscale": best_ls,
-        "X_mean": X_mean,
-        "X_std": X_std,
+        "X_mean": torch.zeros(X.shape[1]),
+        "X_std": torch.ones(X.shape[1]),
     }
     predict_causal_raster(gs, model, artifact, output_dir, args)
     predict_temperature_raster(gs, model, likelihood, artifact, output_dir, args)
