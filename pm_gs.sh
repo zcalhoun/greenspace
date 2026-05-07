@@ -1,12 +1,12 @@
 #!/bin/bash
 
 #SBATCH --job-name=pm_gs
-#SBATCH --array=0-21
+#SBATCH --array=1,3,10,19,20,21
 #SBATCH --mail-user=zachary.calhoun@duke.edu
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH -p scavenger-gpu
-#SBATCH --gres=gpu:1
-#SBATCH --mem=16G
+#SBATCH --gres=gpu:2080:1
+#SBATCH --mem=32G
 #SBATCH --output=./pm_gs/%a.txt
 #SBATCH --error=./pm_gs/%a.err
 
