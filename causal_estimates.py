@@ -7,6 +7,8 @@ import rasterio
 import rasterio.windows
 from rasterio.warp import transform_bounds
 from rasterio.transform import AffineTransformer
+from scipy.spatial import KDTree
+from sklearn.neighbors import NearestNeighbors
 import torch
 import gpytorch
 from torch.utils.data import TensorDataset, DataLoader
@@ -22,7 +24,7 @@ from utils import SimpleLogger, lstsq_init
 logger = SimpleLogger()
 
 
-def train_model(gs, train_loader, l2_penalty, lengthscale, args):
+def train_model(gs, train_loader, l2_penalty, lengthscale, args, intercept):
     num_inducing_points = args.num_inducing_points
 
     num_dims = sum(gs.num_dims) * 2 + 1
@@ -30,7 +32,7 @@ def train_model(gs, train_loader, l2_penalty, lengthscale, args):
         num_dims,
         lengthscale=lengthscale,
         num_inducing_points=num_inducing_points,
-        intercept=gs.init_temp,
+        intercept=intercept,
     )
     likelihood = GaussianLikelihood()
 
@@ -161,12 +163,12 @@ def _farthest_point_sample(coords, residuals, k):
     return coords[torch.tensor(selected)]
 
 
-def _train_with_retry(gs, loader, l2_penalty, lengthscale, args, max_retries=3):
+def _train_with_retry(gs, loader, l2_penalty, lengthscale, args, intercept, max_retries=3):
     jitter_levels = [1e-6, 1e-3, 1e-2]
     for attempt, jitter in enumerate(jitter_levels[:max_retries]):
         try:
             with gpytorch.settings.cholesky_jitter(jitter):
-                return train_model(gs, loader, l2_penalty, lengthscale, args)
+                return train_model(gs, loader, l2_penalty, lengthscale, args, intercept)
         except NotPSDError:
             if attempt < max_retries - 1:
                 logger.warn(
@@ -176,7 +178,58 @@ def _train_with_retry(gs, loader, l2_penalty, lengthscale, args, max_retries=3):
                 raise
 
 
-def predict_causal_raster(gs, model, artifact, output_dir, args, tile_rows=256):
+def build_coverage_trees(train_coords_km, train_X, feature_quantile=0.99):
+    """
+    Fit a KDTree on spatial coords and a NearestNeighbors index on features.
+    Returns (coord_tree, feat_nn, feature_threshold) where feature_threshold
+    is the given percentile of training self-NN distances in feature space.
+    """
+    coord_tree = KDTree(train_coords_km)
+
+    feat_nn = NearestNeighbors(n_neighbors=2, algorithm="ball_tree")
+    feat_nn.fit(train_X)
+    # k=2: first neighbour is the point itself (distance 0), second is true NN
+    self_dists, _ = feat_nn.kneighbors(train_X)
+    feature_threshold = float(np.percentile(self_dists[:, 1], feature_quantile * 100))
+    logger.info(
+        f"Feature mask threshold (p{feature_quantile * 100:.0f}): {feature_threshold:.4f}"
+    )
+
+    return coord_tree, feat_nn, feature_threshold
+
+
+def tile_coverage_mask(
+    coord_tree,
+    feat_nn,
+    feature_threshold,
+    tile_coords_km,
+    tile_X,
+    spatial_threshold_km=5.0,
+):
+    """
+    Return a boolean array (True = mask/extrapolation) for N tile pixels.
+    A pixel is masked when it is >spatial_threshold_km from any training point
+    OR its feature vector exceeds feature_threshold distance from any training point.
+    """
+    spatial_dists, _ = coord_tree.query(tile_coords_km, workers=-1)
+    spatial_mask = spatial_dists > spatial_threshold_km
+
+    feat_dists, _ = feat_nn.kneighbors(tile_X, n_neighbors=1)
+    feature_mask = feat_dists[:, 0] > feature_threshold
+
+    return spatial_mask | feature_mask
+
+
+def predict_causal_raster(
+    gs,
+    model,
+    artifact,
+    output_dir,
+    args,
+    train_coords,
+    train_X,
+    tile_rows=256,
+):
     """
     Tile the NLCD raster and write an 8-band causal effects GeoTIFF clipped to
     the spatial extent of the greenspace raster.
@@ -190,6 +243,11 @@ def predict_causal_raster(gs, model, artifact, output_dir, args, tile_rows=256):
     The GP residual and intercept cancel vs the no-GS baseline.
     Indirect effect: weighted_GS features (indices 11–18).
     Direct effect:   point_GS features   (indices 30–37).
+
+    Pixels that are >args.spatial_mask_km from any training survey point, or
+    whose feature vector is farther from training than the
+    args.feature_mask_quantile percentile of training self-NN distances, are
+    set to NaN.
     """
     gs.precompute_features(artifact["lengthscale"])
 
@@ -198,6 +256,7 @@ def predict_causal_raster(gs, model, artifact, output_dir, args, tile_rows=256):
 
     X_mean = artifact["X_mean"].to(device)
     X_std = artifact["X_std"].to(device)
+    y_std = artifact["y_std"].item()
     beta = model.beta.detach().to(device)
 
     n_nlcd = len(gs._NLCD_CLASSES)  # 11
@@ -229,6 +288,10 @@ def predict_causal_raster(gs, model, artifact, output_dir, args, tile_rows=256):
     )
     causal_bands = np.full((n_causal_bands, H_clip, W_clip), np.nan, dtype=np.float32)
 
+    coord_tree, feat_nn, feat_thresh = build_coverage_trees(
+        train_coords.numpy(), train_X.numpy(), args.feature_mask_quantile
+    )
+
     for row_start in range(row_min, row_max, tile_rows):
         row_end = min(row_start + tile_rows, row_max)
         tile_H = row_end - row_start
@@ -237,16 +300,25 @@ def predict_causal_raster(gs, model, artifact, output_dir, args, tile_rows=256):
         _coords, X = gs.get_raster_tile(row_start, row_end)
         X_norm = (X.to(device) - X_mean) / (X_std + 1e-8)
 
+        mask = tile_coverage_mask(
+            coord_tree,
+            feat_nn,
+            feat_thresh,
+            _coords.numpy(),
+            X.numpy(),
+            args.spatial_mask_km,
+        )
+        mask_2d = mask.reshape(tile_H, W_full)[:, col_min:col_max]
+
         with torch.no_grad():
             out_row = row_start - row_min
             for band_idx in range(n_gs):
                 wi = weighted_gs_start + band_idx
                 pi = point_gs_start + band_idx
-                ce = X_norm[:, wi] * beta[wi] + X_norm[:, pi] * beta[pi]
-                ce_full = ce.cpu().numpy().reshape(tile_H, W_full)
-                causal_bands[band_idx, out_row : out_row + tile_H, :] = ce_full[
-                    :, col_min:col_max
-                ]
+                ce = (X_norm[:, wi] * beta[wi] + X_norm[:, pi] * beta[pi]) * y_std
+                ce_slice = ce.cpu().numpy().reshape(tile_H, W_full)[:, col_min:col_max]
+                ce_slice[mask_2d] = np.nan
+                causal_bands[band_idx, out_row : out_row + tile_H, :] = ce_slice
 
     out_path = os.path.join(output_dir, f"causal_effects_{args.time}.tif")
     clip_window = rasterio.windows.Window(col_min, row_min, W_clip, H_clip)
@@ -275,7 +347,7 @@ def predict_causal_raster(gs, model, artifact, output_dir, args, tile_rows=256):
 
 
 def predict_temperature_raster(
-    gs, model, likelihood, artifact, output_dir, args, tile_rows=256
+    gs, model, likelihood, artifact, output_dir, args, train_coords, train_X, tile_rows=256
 ):
     """
     Tile the NLCD raster (clipped to the greenspace extent) and write a 2-band
@@ -286,6 +358,9 @@ def predict_temperature_raster(
 
     The predictive distribution comes from ``likelihood(model(c, X))``, which
     includes observation noise and gives a realistic uncertainty estimate.
+
+    Pixels outside the coverage mask (>args.spatial_mask_km from training data
+    or feature extrapolation beyond args.feature_mask_quantile) are set to NaN.
     """
     gs.precompute_features(artifact["lengthscale"])
 
@@ -295,6 +370,8 @@ def predict_temperature_raster(
 
     X_mean = artifact["X_mean"].to(device)
     X_std = artifact["X_std"].to(device)
+    y_mean = artifact["y_mean"].item()
+    y_std = artifact["y_std"].item()
 
     # Compute the same GS-extent clip window used by predict_causal_raster.
     H_full, W_full = gs.nlcd.data.shape
@@ -314,6 +391,10 @@ def predict_temperature_raster(
     pred_mean = np.full((H_clip, W_clip), np.nan, dtype=np.float32)
     pred_std = np.full((H_clip, W_clip), np.nan, dtype=np.float32)
 
+    coord_tree, feat_nn, feat_thresh = build_coverage_trees(
+        train_coords.numpy(), train_X.numpy(), args.feature_mask_quantile
+    )
+
     for row_start in range(row_min, row_max, tile_rows):
         row_end = min(row_start + tile_rows, row_max)
         tile_H = row_end - row_start
@@ -324,6 +405,16 @@ def predict_temperature_raster(
         coords, X = gs.get_raster_tile(row_start, row_end)
         X_norm = (X.to(device) - X_mean) / (X_std + 1e-8)
 
+        mask = tile_coverage_mask(
+            coord_tree,
+            feat_nn,
+            feat_thresh,
+            coords.numpy(),
+            X.numpy(),
+            args.spatial_mask_km,
+        )
+        mask_2d = mask.reshape(tile_H, W_full)[:, col_min:col_max]
+
         with torch.no_grad(), gpytorch.settings.fast_pred_var():
             f_pred = model(coords.to(device), X_norm)
             y_pred = likelihood(f_pred)
@@ -331,12 +422,12 @@ def predict_temperature_raster(
             var = y_pred.variance.cpu().numpy()
 
         out_row = row_start - row_min
-        pred_mean[out_row : out_row + tile_H, :] = mu.reshape(tile_H, W_full)[
-            :, col_min:col_max
-        ]
-        pred_std[out_row : out_row + tile_H, :] = np.sqrt(np.maximum(var, 0.0)).reshape(
-            tile_H, W_full
-        )[:, col_min:col_max]
+        mu_slice = mu.reshape(tile_H, W_full)[:, col_min:col_max] * y_std + y_mean
+        std_slice = np.sqrt(np.maximum(var, 0.0)).reshape(tile_H, W_full)[:, col_min:col_max] * y_std
+        mu_slice[mask_2d] = np.nan
+        std_slice[mask_2d] = np.nan
+        pred_mean[out_row : out_row + tile_H, :] = mu_slice
+        pred_std[out_row : out_row + tile_H, :] = std_slice
 
     out_path = os.path.join(output_dir, f"predicted_temperature_{args.time}.tif")
     clip_window = rasterio.windows.Window(col_min, row_min, W_clip, H_clip)
@@ -393,14 +484,20 @@ def main(args):
 
     all_idx = np.arange(len(gs))
     coords, X, y = extract_features(gs, all_idx, best_ls)
-    # pdb.set_trace()
-    # All features are already in [0, 1] (GS/NLCD proportions, one-hot, and
-    # elevation min-max scaled by the dataloader). No further normalization needed.
-    ds = TensorDataset(coords, X, y)
+
+    # Standardize y so the L2 penalty has consistent meaning across cities.
+    y_mean = y.mean()
+    y_std = y.std().clamp(min=1e-4)
+    y_norm = (y - y_mean) / y_std
+    logger.info(f"y — mean: {y_mean.item():.3f} °C, std: {y_std.item():.3f} °C")
+
+    ds = TensorDataset(coords, X, y_norm)
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True)
 
     logger.info("Training model on all data...")
-    _, model, likelihood = _train_with_retry(gs, loader, best_l2, best_ls, args)
+    _, model, likelihood = _train_with_retry(
+        gs, loader, best_l2, best_ls, args, intercept=torch.tensor(0.0)
+    )
 
     torch.save(model.state_dict(), os.path.join(output_dir, "causal_model.pth"))
     torch.save(
@@ -411,9 +508,11 @@ def main(args):
         "lengthscale": best_ls,
         "X_mean": torch.zeros(X.shape[1]),
         "X_std": torch.ones(X.shape[1]),
+        "y_mean": y_mean,
+        "y_std": y_std,
     }
-    predict_causal_raster(gs, model, artifact, output_dir, args)
-    predict_temperature_raster(gs, model, likelihood, artifact, output_dir, args)
+    predict_causal_raster(gs, model, artifact, output_dir, args, train_coords=coords, train_X=X)
+    predict_temperature_raster(gs, model, likelihood, artifact, output_dir, args, train_coords=coords, train_X=X)
 
 
 if __name__ == "__main__":
@@ -489,6 +588,18 @@ if __name__ == "__main__":
         type=int,
         default=1,
         help="Downsample GS rasters by this factor to speed up training and reduce memory usage.",
+    )
+    parser.add_argument(
+        "--spatial-mask-km",
+        type=float,
+        default=5.0,
+        help="Mask pixels farther than this many km from any training survey point.",
+    )
+    parser.add_argument(
+        "--feature-mask-quantile",
+        type=float,
+        default=0.99,
+        help="Percentile of training self-NN distances used as the feature extrapolation threshold.",
     )
     arguments = parser.parse_args()
     main(arguments)

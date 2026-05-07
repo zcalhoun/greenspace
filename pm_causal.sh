@@ -6,7 +6,7 @@
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH -p scavenger-gpu
 #SBATCH --gres=gpu:1
-#SBATCH --mem=16G
+#SBATCH --mem=32G
 #SBATCH --output=./pm_causal/%a.txt
 #SBATCH --error=./pm_causal/%a.err
 
@@ -22,5 +22,7 @@ python causal_estimates.py \
     --window-size 500 \
     --gs-downsample 10 \
     --num-inducing-points 100 \
-    --lengthscale 200 \
-    --l2-penalty 0.001
+    --lengthscale 120 \
+    --l2-penalty 0.001 \
+    --spatial-mask-km 10.0 \
+    --feature-mask-quantile 0.999
