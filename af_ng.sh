@@ -20,6 +20,6 @@ python main.py \
     --lr 0.01 \
     --batch-size 128 \
     --window-size 500 \
-    --bayes-opt-iters 50 \
+    --bayes-opt-iters 40 \
     --num-inducing-points 100 \
     --time af
