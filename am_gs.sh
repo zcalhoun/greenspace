@@ -4,9 +4,9 @@
 #SBATCH --array=0-21
 #SBATCH --mail-user=zachary.calhoun@duke.edu
 #SBATCH --mail-type=BEGIN,END,FAIL
-#SBATCH -p carlsonlab-gpu
+#SBATCH -p scavenger-gpu
 #SBATCH --gres=gpu:1
-#SBATCH --mem=32G
+#SBATCH --mem=16G
 #SBATCH --output=./am_gs/%a.txt
 #SBATCH --error=./am_gs/%a.err
 
@@ -20,7 +20,7 @@ python main.py \
     --lr 0.01 \
     --batch-size 128 \
     --window-size 500 \
-    --bayes-opt-iters 50 \
+    --bayes-opt-iters 40 \
     --greenspace \
     --gs-downsample 10 \
     --num-inducing-points 100 \
