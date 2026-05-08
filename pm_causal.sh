@@ -25,4 +25,4 @@ python causal_estimates.py \
     --lengthscale 120 \
     --l2-penalty 0.001 \
     --spatial-mask-km 10.0 \
-    --feature-mask-quantile 0.99
+    --feature-mask-quantile 0.999
