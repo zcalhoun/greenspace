@@ -8,7 +8,6 @@ import rasterio.windows
 from rasterio.warp import transform_bounds
 from rasterio.transform import AffineTransformer
 from scipy.spatial import KDTree
-from sklearn.neighbors import NearestNeighbors
 import torch
 import gpytorch
 from torch.utils.data import TensorDataset, DataLoader
@@ -178,55 +177,27 @@ def _train_with_retry(gs, loader, l2_penalty, lengthscale, args, intercept, max_
                 raise
 
 
-def build_coverage_trees(train_coords_km, train_X, feature_quantile=0.99, n_windowed=None):
-    """
-    Fit a KDTree on spatial coords and a NearestNeighbors index on features.
-    Returns (coord_tree, feat_nn, feature_threshold) where feature_threshold
-    is the given percentile of training self-NN distances in feature space.
-
-    n_windowed: if set, only the first n_windowed features are used for the
-    feature distance calculation. This avoids high-resolution point features
-    (e.g. 0.6 m GS classes) that would produce isolated masked pixels.
-    """
-    coord_tree = KDTree(train_coords_km)
-
-    X_feat = train_X[:, :n_windowed] if n_windowed is not None else train_X
-    feat_nn = NearestNeighbors(n_neighbors=2, algorithm="ball_tree")
-    feat_nn.fit(X_feat)
-    # k=2: first neighbour is the point itself (distance 0), second is true NN
-    self_dists, _ = feat_nn.kneighbors(X_feat)
-    feature_threshold = float(np.percentile(self_dists[:, 1], feature_quantile * 100))
-    logger.info(
-        f"Feature mask threshold (p{feature_quantile * 100:.0f}): {feature_threshold:.4f}"
-    )
-
-    return coord_tree, feat_nn, feature_threshold
+def build_spatial_tree(train_coords_km):
+    """KDTree on training survey coords (km) for spatial proximity masking."""
+    return KDTree(train_coords_km)
 
 
 def tile_coverage_mask(
     coord_tree,
-    feat_nn,
-    feature_threshold,
     tile_coords_km,
     tile_X,
-    spatial_threshold_km=5.0,
-    n_windowed=None,
+    spatial_threshold_km,
+    water_feature_idx,
 ):
     """
-    Return a boolean array (True = mask/extrapolation) for N tile pixels.
+    Return a boolean array (True = mask) for N tile pixels.
     A pixel is masked when it is >spatial_threshold_km from any training point
-    OR its feature vector exceeds feature_threshold distance from any training point.
-
-    n_windowed must match the value passed to build_coverage_trees.
+    OR its point NLCD feature indicates Open Water (NLCD class 11).
     """
     spatial_dists, _ = coord_tree.query(tile_coords_km, workers=-1)
     spatial_mask = spatial_dists > spatial_threshold_km
-
-    X_feat = tile_X[:, :n_windowed] if n_windowed is not None else tile_X
-    feat_dists, _ = feat_nn.kneighbors(X_feat, n_neighbors=1)
-    feature_mask = feat_dists[:, 0] > feature_threshold
-
-    return spatial_mask | feature_mask
+    water_mask = tile_X[:, water_feature_idx] > 0.5
+    return spatial_mask | water_mask
 
 
 def predict_causal_raster(
@@ -254,9 +225,7 @@ def predict_causal_raster(
     Direct effect:   point_GS features   (indices 30–37).
 
     Pixels that are >args.spatial_mask_km from any training survey point, or
-    whose feature vector is farther from training than the
-    args.feature_mask_quantile percentile of training self-NN distances, are
-    set to NaN.
+    classified as Open Water (NLCD class 11), are set to NaN.
     """
     gs.precompute_features(artifact["lengthscale"])
 
@@ -297,13 +266,10 @@ def predict_causal_raster(
     )
     causal_bands = np.full((n_causal_bands, H_clip, W_clip), np.nan, dtype=np.float32)
 
-    # Use only the windowed (FFT-smoothed) features for the feature mask so that
-    # the mask varies smoothly in space and does not produce isolated masked pixels
-    # from high-resolution (0.6 m) point GS class values.
-    n_windowed = n_nlcd + n_gs
-    coord_tree, feat_nn, feat_thresh = build_coverage_trees(
-        train_coords.numpy(), train_X.numpy(), args.feature_mask_quantile, n_windowed=n_windowed
-    )
+    coord_tree = build_spatial_tree(train_coords.numpy())
+    # Point NLCD features start after the weighted NLCD + weighted GS features.
+    # _NLCD_CLASSES[0] = 11 (Open Water), so the first point-NLCD feature is water.
+    water_feat_idx = n_nlcd + n_gs
 
     for row_start in range(row_min, row_max, tile_rows):
         row_end = min(row_start + tile_rows, row_max)
@@ -315,12 +281,10 @@ def predict_causal_raster(
 
         mask = tile_coverage_mask(
             coord_tree,
-            feat_nn,
-            feat_thresh,
             _coords.numpy(),
             X.numpy(),
             args.spatial_mask_km,
-            n_windowed=n_windowed,
+            water_feat_idx,
         )
         mask_2d = mask.reshape(tile_H, W_full)[:, col_min:col_max]
 
@@ -373,8 +337,8 @@ def predict_temperature_raster(
     The predictive distribution comes from ``likelihood(model(c, X))``, which
     includes observation noise and gives a realistic uncertainty estimate.
 
-    Pixels outside the coverage mask (>args.spatial_mask_km from training data
-    or feature extrapolation beyond args.feature_mask_quantile) are set to NaN.
+    Pixels that are >args.spatial_mask_km from any training survey point, or
+    classified as Open Water (NLCD class 11), are set to NaN.
     """
     gs.precompute_features(artifact["lengthscale"])
 
@@ -405,10 +369,10 @@ def predict_temperature_raster(
     pred_mean = np.full((H_clip, W_clip), np.nan, dtype=np.float32)
     pred_std = np.full((H_clip, W_clip), np.nan, dtype=np.float32)
 
-    n_windowed = len(gs._NLCD_CLASSES) + len(gs._GREEN_CLASSES)
-    coord_tree, feat_nn, feat_thresh = build_coverage_trees(
-        train_coords.numpy(), train_X.numpy(), args.feature_mask_quantile, n_windowed=n_windowed
-    )
+    n_nlcd = len(gs._NLCD_CLASSES)
+    n_gs = len(gs._GREEN_CLASSES)
+    coord_tree = build_spatial_tree(train_coords.numpy())
+    water_feat_idx = n_nlcd + n_gs
 
     for row_start in range(row_min, row_max, tile_rows):
         row_end = min(row_start + tile_rows, row_max)
@@ -422,12 +386,10 @@ def predict_temperature_raster(
 
         mask = tile_coverage_mask(
             coord_tree,
-            feat_nn,
-            feat_thresh,
             coords.numpy(),
             X.numpy(),
             args.spatial_mask_km,
-            n_windowed=n_windowed,
+            water_feat_idx,
         )
         mask_2d = mask.reshape(tile_H, W_full)[:, col_min:col_max]
 
@@ -610,12 +572,6 @@ if __name__ == "__main__":
         type=float,
         default=5.0,
         help="Mask pixels farther than this many km from any training survey point.",
-    )
-    parser.add_argument(
-        "--feature-mask-quantile",
-        type=float,
-        default=0.99,
-        help="Percentile of training self-NN distances used as the feature extrapolation threshold.",
     )
     arguments = parser.parse_args()
     main(arguments)

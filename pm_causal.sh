@@ -24,5 +24,4 @@ python causal_estimates.py \
     --num-inducing-points 100 \
     --lengthscale 120 \
     --l2-penalty 0.001 \
-    --spatial-mask-km 10.0 \
-    --feature-mask-quantile 0.9999
+    --spatial-mask-km 10.0
