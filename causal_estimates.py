@@ -312,6 +312,19 @@ def predict_causal_raster(
         transform=clip_transform,
     )
 
+    # Identify bands with meaningful spatial variability.
+    band_stds = np.array([np.nanstd(causal_bands[k]) for k in range(n_gs)])
+    std_threshold = 0.1 * band_stds.max()
+    active_classes = [
+        gs._GREEN_CLASSES[k] for k in range(n_gs) if band_stds[k] >= std_threshold
+    ]
+    logger.info(
+        f"Band stds: { {gs._GREEN_CLASSES[k]: f'{band_stds[k]:.4f}' for k in range(n_gs)} }"
+    )
+    logger.info(
+        f"Active GS classes (std >= {std_threshold:.4f} °C): {active_classes}"
+    )
+
     with rasterio.open(out_path, "w", **profile) as dst:
         for band_idx in range(n_gs):
             gs_class = gs._GREEN_CLASSES[band_idx]
@@ -319,6 +332,8 @@ def predict_causal_raster(
             dst.update_tags(
                 band_idx + 1,
                 description=f"Causal effect of GS class {gs_class} vs no-greenspace baseline (°C)",
+                spatial_std=f"{band_stds[band_idx]:.6f}",
+                active=str(band_stds[band_idx] >= std_threshold),
             )
 
     logger.info(f"Causal effects raster saved → {out_path}")
