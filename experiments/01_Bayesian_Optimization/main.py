@@ -23,8 +23,8 @@ from gpytorch.likelihoods import GaussianLikelihood
 from gpytorch.mlls import VariationalELBO
 from linear_operator.utils.errors import NotPSDError
 
-from greenspace.dataloader import GreenspaceDataset
-from greenspace.model import CompleteModel, RidgeGP
+from greenspace.dataloaders import GreenspaceDataset
+from greenspace.models import CompleteModel, RidgeGP
 from greenspace.utils import SimpleLogger, lstsq_init
 from greenspace.trainers import BayesianOptimization
 

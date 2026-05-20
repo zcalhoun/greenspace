@@ -1,3 +1,7 @@
+"""
+Contains a set of shared classes and functions for experiments.
+"""
+
 from datetime import datetime
 
 import torch
