@@ -1,11 +1,27 @@
 # environment
 .venv/
+CLAUDE.md
+.obsidian
+notes/
+.claude/
 
 # data
 data/
+asheville/
 
 # results
 results/
+example_models/
+notebooks/
+
+# testing
+process_asheville.sh
+test_results/
+
+# build artifacts
+__pycache__/
+*.egg-info/
 
 # other
 .DS_Store
+archived_scripts/
