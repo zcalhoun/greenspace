@@ -1,1 +1,1 @@
-from .dataloader import GreenspaceDataset, CausalGreenspaceDataset
+from .dataset import GreenspaceDataset, CausalGreenspaceDataset
