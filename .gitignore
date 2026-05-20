@@ -9,10 +9,10 @@ notes/
 data/
 asheville/
 
-# results
+# temporary results
 results/
 example_models/
-notebooks/
+notebooks_hidden/
 
 # testing
 process_asheville.sh
