@@ -1,10 +1,10 @@
 import unittest
 
 # CLASSES
-from trainers import BayesianOptimization, Trial
+from greenspace.trainers import BayesianOptimization, Trial
 
 # FUNCTIONS
-from trainers import _rand_sample_within_bounds
+from greenspace.trainers import _rand_sample_within_bounds
 
 import numpy as np
 

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "greenspace"
+version = "0.1.0"
+description = "Urban greenspace and temperature analysis using a hybrid linear + Gaussian Process model"
+requires-python = ">=3.9"
+dependencies = [
+    "torch",
+    "gpytorch",
+    "linear_operator",
+    "numpy",
+    "pandas",
+    "geopandas",
+    "rasterio",
+    "pyproj",
+    "scikit-learn",
+    "scipy",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["greenspace*"]

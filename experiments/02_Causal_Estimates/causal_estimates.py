@@ -15,10 +15,9 @@ from gpytorch.likelihoods import GaussianLikelihood
 from gpytorch.mlls import VariationalELBO
 from linear_operator.utils.errors import NotPSDError
 
-sys.path.append("./src")
-from dataloader_v2 import CausalGreenspaceDataset
-from model import RidgeGP
-from utils import SimpleLogger, lstsq_init
+from greenspace.dataloader import CausalGreenspaceDataset
+from greenspace.model import RidgeGP
+from greenspace.utils import SimpleLogger, lstsq_init
 
 logger = SimpleLogger()
 
